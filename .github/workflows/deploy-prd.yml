@@ -55,5 +55,8 @@ jobs:
               --image "$IMAGE" \
               --region ${{ env.REGION }} \
               --project ${{ env.PROJECT }} \
-              --args "--env,prd,--source,spotify,--data-types,recently_played,--output-dir,gs://ela-dp-prd"
+              --args="--env" --args="prd" \
+              --args="--source" --args="spotify" \
+              --args="--data-types" --args="recently_played" \
+              --args="--output-dir" --args="gs://ela-dp-prd"
           fi
