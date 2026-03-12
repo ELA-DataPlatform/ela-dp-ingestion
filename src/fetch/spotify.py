@@ -1,0 +1,342 @@
+"""
+Spotify Data Fetcher
+--------------------
+Fetches various types of Spotify user data via the Spotify Web API.
+
+Supported data types:
+ - recently_played
+ - saved_tracks
+ - saved_albums
+ - followed_artists
+ - playlists
+ - user_profile
+ - top_tracks
+ - top_artists
+"""
+
+import logging
+import os
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from enum import Enum
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Union
+from zoneinfo import ZoneInfo
+
+import spotipy
+from spotipy.oauth2 import SpotifyOAuth
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_LIMIT = 50
+DEFAULT_TIMEZONE = "Europe/Paris"
+
+
+class DataType(Enum):
+    """Supported Spotify data types."""
+
+    RECENTLY_PLAYED = "recently_played"
+    SAVED_TRACKS = "saved_tracks"
+    SAVED_ALBUMS = "saved_albums"
+    FOLLOWED_ARTISTS = "followed_artists"
+    PLAYLISTS = "playlists"
+    USER_PROFILE = "user_profile"
+    TOP_TRACKS = "top_tracks"
+    TOP_ARTISTS = "top_artists"
+
+
+@dataclass
+class SpotifyConfig:
+    """Configuration for the Spotify fetcher."""
+
+    client_id: str
+    client_secret: str
+    redirect_uri: str
+    refresh_token: str
+    cache_path: Path
+    timezone: str = DEFAULT_TIMEZONE
+
+
+class SpotifyConnectorError(Exception):
+    pass
+
+
+class SpotifyConnector:
+    """Spotify data connector with support for multiple data types."""
+
+    SCOPES = {
+        DataType.RECENTLY_PLAYED: "user-read-recently-played",
+        DataType.SAVED_TRACKS: "user-library-read",
+        DataType.SAVED_ALBUMS: "user-library-read",
+        DataType.FOLLOWED_ARTISTS: "user-follow-read",
+        DataType.PLAYLISTS: "playlist-read-private playlist-read-collaborative",
+        DataType.USER_PROFILE: "user-read-private user-read-email",
+        DataType.TOP_TRACKS: "user-top-read",
+        DataType.TOP_ARTISTS: "user-top-read",
+    }
+
+    def __init__(self, config: SpotifyConfig):
+        self.config = config
+        self._client: Optional[spotipy.Spotify] = None
+
+    def authenticate(self, data_types: List[DataType]) -> None:
+        """Authenticate with Spotify for the given data types."""
+        required_scopes = set()
+        for data_type in data_types:
+            if data_type in self.SCOPES:
+                required_scopes.update(self.SCOPES[data_type].split())
+
+        scope_string = " ".join(sorted(required_scopes))
+        logger.info(f"Authenticating with scopes: {scope_string}")
+
+        try:
+            auth_manager = SpotifyOAuth(
+                client_id=self.config.client_id,
+                client_secret=self.config.client_secret,
+                redirect_uri=self.config.redirect_uri,
+                scope=scope_string,
+                cache_path=str(self.config.cache_path),
+            )
+
+            if self.config.cache_path.exists():
+                self.config.cache_path.unlink()
+                logger.debug("Cleared existing token cache")
+
+            try:
+                token_info = auth_manager.refresh_access_token(self.config.refresh_token)
+                access_token = token_info.get("access_token")
+            except Exception as refresh_error:
+                raise SpotifyConnectorError(
+                    f"Refresh token authentication failed: {refresh_error}. "
+                    "Check your refresh token or re-run the OAuth flow."
+                )
+
+            if not access_token:
+                raise SpotifyConnectorError("Failed to get access token")
+
+            self._client = spotipy.Spotify(auth=access_token)
+
+            try:
+                self._client.current_user()
+                logger.info("Authenticated successfully and verified")
+            except Exception as test_error:
+                raise SpotifyConnectorError(
+                    f"Authentication verification failed: {test_error}"
+                )
+
+        except SpotifyConnectorError:
+            raise
+        except Exception as e:
+            raise SpotifyConnectorError(f"Authentication failed: {e}") from e
+
+    @classmethod
+    def from_env(cls, cache_path: Optional[Path] = None) -> "SpotifyConnector":
+        """Create a SpotifyConnector from environment variables."""
+        required = {
+            "SPOTIFY_CLIENT_ID": None,
+            "SPOTIFY_CLIENT_SECRET": None,
+            "SPOTIFY_REDIRECT_URI": None,
+            "SPOTIFY_REFRESH_TOKEN": None,
+        }
+        missing = [k for k in required if not os.getenv(k)]
+        if missing:
+            raise SpotifyConnectorError(
+                f"Missing required environment variables: {', '.join(missing)}"
+            )
+
+        config = SpotifyConfig(
+            client_id=os.environ["SPOTIFY_CLIENT_ID"],
+            client_secret=os.environ["SPOTIFY_CLIENT_SECRET"],
+            redirect_uri=os.environ["SPOTIFY_REDIRECT_URI"],
+            refresh_token=os.environ["SPOTIFY_REFRESH_TOKEN"],
+            cache_path=cache_path or Path(".spotify_cache"),
+        )
+        return cls(config)
+
+    @property
+    def client(self) -> spotipy.Spotify:
+        if self._client is None:
+            raise SpotifyConnectorError("Not authenticated. Call authenticate() first.")
+        return self._client
+
+    def fetch_recently_played(self, limit: int = DEFAULT_LIMIT) -> List[Dict[str, Any]]:
+        """Fetch recently played tracks since 23:00 yesterday (1-hour safety buffer)."""
+        try:
+            paris_tz = ZoneInfo("Europe/Paris")
+            now_paris = datetime.now(paris_tz)
+            today_midnight_paris = now_paris.replace(hour=0, minute=0, second=0, microsecond=0)
+            yesterday_23h_paris = today_midnight_paris - timedelta(hours=1)
+            after_timestamp = int(yesterday_23h_paris.timestamp() * 1000)
+
+            results = self.client.current_user_recently_played(limit=limit, after=after_timestamp)
+            items = results.get("items", [])
+            logger.info(f"Fetched {len(items)} tracks played since 23:00 yesterday")
+            return items
+        except Exception as e:
+            raise SpotifyConnectorError(f"Error fetching recently played: {e}") from e
+
+    def fetch_saved_tracks(self, limit: int = DEFAULT_LIMIT) -> List[Dict[str, Any]]:
+        """Fetch saved tracks added since 23:00 yesterday (1-hour safety buffer)."""
+        try:
+            paris_tz = ZoneInfo("Europe/Paris")
+            now_paris = datetime.now(paris_tz)
+            today_midnight_paris = now_paris.replace(hour=0, minute=0, second=0, microsecond=0)
+            yesterday_23h_paris = today_midnight_paris - timedelta(hours=1)
+
+            filtered_items = []
+            offset = 0
+            batch_size = 50
+
+            while len(filtered_items) < limit:
+                results = self.client.current_user_saved_tracks(limit=batch_size, offset=offset)
+                batch_items = results.get("items", [])
+                if not batch_items:
+                    break
+
+                for item in batch_items:
+                    added_at_str = item.get("added_at", "")
+                    if added_at_str:
+                        added_at = datetime.fromisoformat(added_at_str.replace("Z", "+00:00"))
+                        if added_at.astimezone(paris_tz) >= yesterday_23h_paris:
+                            filtered_items.append(item)
+                        else:
+                            logger.info(f"Fetched {len(filtered_items)} saved tracks")
+                            return filtered_items[:limit]
+
+                offset += len(batch_items)
+                if len(batch_items) < batch_size:
+                    break
+
+            logger.info(f"Fetched {len(filtered_items)} saved tracks")
+            return filtered_items[:limit]
+        except Exception as e:
+            raise SpotifyConnectorError(f"Error fetching saved tracks: {e}") from e
+
+    def fetch_saved_albums(self, limit: int = DEFAULT_LIMIT) -> List[Dict[str, Any]]:
+        """Fetch saved albums added since 23:00 yesterday (1-hour safety buffer)."""
+        try:
+            paris_tz = ZoneInfo("Europe/Paris")
+            now_paris = datetime.now(paris_tz)
+            today_midnight_paris = now_paris.replace(hour=0, minute=0, second=0, microsecond=0)
+            yesterday_23h_paris = today_midnight_paris - timedelta(hours=1)
+
+            filtered_items = []
+            offset = 0
+            batch_size = 50
+
+            while len(filtered_items) < limit:
+                results = self.client.current_user_saved_albums(limit=batch_size, offset=offset)
+                batch_items = results.get("items", [])
+                if not batch_items:
+                    break
+
+                for item in batch_items:
+                    added_at_str = item.get("added_at", "")
+                    if added_at_str:
+                        added_at = datetime.fromisoformat(added_at_str.replace("Z", "+00:00"))
+                        if added_at.astimezone(paris_tz) >= yesterday_23h_paris:
+                            filtered_items.append(item)
+                        else:
+                            logger.info(f"Fetched {len(filtered_items)} saved albums")
+                            return filtered_items[:limit]
+
+                offset += len(batch_items)
+                if len(batch_items) < batch_size:
+                    break
+
+            logger.info(f"Fetched {len(filtered_items)} saved albums")
+            return filtered_items[:limit]
+        except Exception as e:
+            raise SpotifyConnectorError(f"Error fetching saved albums: {e}") from e
+
+    def fetch_followed_artists(self, limit: int = DEFAULT_LIMIT) -> List[Dict[str, Any]]:
+        """Fetch user's followed artists."""
+        try:
+            items = []
+            after = None
+            batch_size = min(limit, 50)
+
+            while len(items) < limit:
+                remaining = limit - len(items)
+                current_limit = min(batch_size, remaining)
+                results = self.client.current_user_followed_artists(
+                    limit=current_limit, after=after
+                )
+                artists_data = results.get("artists", {})
+                batch_items = artists_data.get("items", [])
+                if not batch_items:
+                    break
+
+                items.extend(batch_items)
+                cursors = artists_data.get("cursors", {})
+                after = cursors.get("after")
+                if not after or len(batch_items) < current_limit:
+                    break
+
+            logger.info(f"Fetched {len(items)} followed artists")
+            return items[:limit]
+        except Exception as e:
+            raise SpotifyConnectorError(f"Error fetching followed artists: {e}") from e
+
+    def fetch_playlists(self, limit: int = DEFAULT_LIMIT) -> List[Dict[str, Any]]:
+        """Fetch user's playlists."""
+        try:
+            results = self.client.current_user_playlists(limit=limit)
+            items = results.get("items", [])
+            logger.info(f"Fetched {len(items)} playlists")
+            return items
+        except Exception as e:
+            raise SpotifyConnectorError(f"Error fetching playlists: {e}") from e
+
+    def fetch_user_profile(self) -> Dict[str, Any]:
+        """Fetch user profile information."""
+        try:
+            profile = self.client.current_user()
+            logger.info("Fetched user profile")
+            return profile
+        except Exception as e:
+            raise SpotifyConnectorError(f"Error fetching user profile: {e}") from e
+
+    def fetch_top_tracks(
+        self, limit: int = DEFAULT_LIMIT, time_range: str = "medium_term"
+    ) -> List[Dict[str, Any]]:
+        """Fetch user's top tracks."""
+        try:
+            results = self.client.current_user_top_tracks(limit=limit, time_range=time_range)
+            items = results.get("items", [])
+            logger.info(f"Fetched {len(items)} top tracks ({time_range})")
+            return items
+        except Exception as e:
+            raise SpotifyConnectorError(f"Error fetching top tracks: {e}") from e
+
+    def fetch_top_artists(
+        self, limit: int = DEFAULT_LIMIT, time_range: str = "medium_term"
+    ) -> List[Dict[str, Any]]:
+        """Fetch user's top artists."""
+        try:
+            results = self.client.current_user_top_artists(limit=limit, time_range=time_range)
+            items = results.get("items", [])
+            logger.info(f"Fetched {len(items)} top artists ({time_range})")
+            return items
+        except Exception as e:
+            raise SpotifyConnectorError(f"Error fetching top artists: {e}") from e
+
+    def fetch_data(
+        self, data_type: DataType, **kwargs
+    ) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
+        """Dispatch fetch by DataType."""
+        method_map = {
+            DataType.RECENTLY_PLAYED: self.fetch_recently_played,
+            DataType.SAVED_TRACKS: self.fetch_saved_tracks,
+            DataType.SAVED_ALBUMS: self.fetch_saved_albums,
+            DataType.FOLLOWED_ARTISTS: self.fetch_followed_artists,
+            DataType.PLAYLISTS: self.fetch_playlists,
+            DataType.USER_PROFILE: self.fetch_user_profile,
+            DataType.TOP_TRACKS: self.fetch_top_tracks,
+            DataType.TOP_ARTISTS: self.fetch_top_artists,
+        }
+
+        if data_type not in method_map:
+            raise SpotifyConnectorError(f"Unsupported data type: {data_type}")
+
+        return method_map[data_type](**kwargs)
