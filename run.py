@@ -63,7 +63,7 @@ def main() -> None:
                 data = [data]
 
             filename = f"{ts}_{args.source}_{dt_enum.value}.jsonl"
-            dest = f"{output_base}/{args.env}/{args.source}/landing/{filename}"
+            dest = f"{output_base}/{filename}"
             write(data, dest)
             results["ok"].append(dt_enum.value)
         except Exception as e:
