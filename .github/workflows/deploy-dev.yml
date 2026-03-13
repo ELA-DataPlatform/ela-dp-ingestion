@@ -10,14 +10,13 @@ env:
   PROJECT: ela-dp-dev
   AR_REPO: ela-dp-ingestion
   IMAGE: ingestion
-  JOB_NAME: ela-dp-ingestion
 
 jobs:
-  deploy:
+  build:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write  # required for Workload Identity Federation
+      id-token: write
 
     steps:
       - uses: actions/checkout@v4
@@ -43,21 +42,49 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Deploy Cloud Run Job
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    strategy:
+      matrix:
+        data_type:
+          - recently_played
+          - saved_tracks
+          - saved_albums
+          - followed_artists
+          - playlists
+          - user_profile
+          - top_tracks
+          - top_artists
+
+    steps:
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/875275187211/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+          service_account: data-fetcher@ela-dp-dev.iam.gserviceaccount.com
+
+      - name: Deploy Cloud Run Job — ${{ matrix.data_type }}
         run: |
           IMAGE="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT }}/${{ env.AR_REPO }}/${{ env.IMAGE }}:${{ github.sha }}"
-          if gcloud run jobs describe ${{ env.JOB_NAME }} --region ${{ env.REGION }} --project ${{ env.PROJECT }} > /dev/null 2>&1; then
-            gcloud run jobs update ${{ env.JOB_NAME }} \
+          JOB_NAME="ela-dp-spotify-$(echo '${{ matrix.data_type }}' | tr '_' '-')"
+
+          if gcloud run jobs describe "$JOB_NAME" --region ${{ env.REGION }} --project ${{ env.PROJECT }} > /dev/null 2>&1; then
+            gcloud run jobs update "$JOB_NAME" \
               --image "$IMAGE" \
               --region ${{ env.REGION }} \
               --project ${{ env.PROJECT }}
           else
-            gcloud run jobs create ${{ env.JOB_NAME }} \
+            gcloud run jobs create "$JOB_NAME" \
               --image "$IMAGE" \
               --region ${{ env.REGION }} \
               --project ${{ env.PROJECT }} \
               --args="--env" --args="dev" \
               --args="--source" --args="spotify" \
-              --args="--data-types" --args="recently_played" \
+              --args="--data-types" --args="${{ matrix.data_type }}" \
               --args="--output-dir" --args="gs://ela-dp-dev"
           fi
