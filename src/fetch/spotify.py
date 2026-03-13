@@ -40,6 +40,7 @@ class DataType(Enum):
     SAVED_ALBUMS = "saved_albums"
     FOLLOWED_ARTISTS = "followed_artists"
     PLAYLISTS = "playlists"
+    USER_PROFILE = "user_profile"
     TOP_TRACKS = "top_tracks"
     TOP_ARTISTS = "top_artists"
 
