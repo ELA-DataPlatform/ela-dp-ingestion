@@ -1,12 +1,16 @@
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 
 def _to_jsonl(data: list) -> str:
-    return "\n".join(json.dumps(item, default=str) for item in data) + "\n"
+    ingested_at = datetime.now(timezone.utc).isoformat()
+    return "\n".join(
+        json.dumps({**item, "_ingested_at": ingested_at}, default=str) for item in data
+    ) + "\n"
 
 
 def write_local(data: list, path: Path) -> None:

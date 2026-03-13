@@ -1,0 +1,25 @@
+spotify:
+  recently_played:
+    dataset: dp_lake_spotify_{env}
+    table: normalized_recently_played
+  saved_tracks:
+    dataset: dp_lake_spotify_{env}
+    table: normalized_saved_tracks
+  saved_albums:
+    dataset: dp_lake_spotify_{env}
+    table: normalized_saved_albums
+  followed_artists:
+    dataset: dp_lake_spotify_{env}
+    table: normalized_followed_artists
+  playlists:
+    dataset: dp_lake_spotify_{env}
+    table: normalized_playlists
+  user_profile:
+    dataset: dp_lake_spotify_{env}
+    table: normalized_user_profile
+  top_tracks:
+    dataset: dp_lake_spotify_{env}
+    table: normalized_top_tracks
+  top_artists:
+    dataset: dp_lake_spotify_{env}
+    table: normalized_top_artists

@@ -33,9 +33,9 @@ def _ensure_dataset(client: bigquery.Client, project: str, dataset: str) -> None
         logger.info(f"Created dataset {project}.{dataset}")
 
 
-def load(gcs_uri: str, data_type: DataType, project: str, dataset: str = DATASET) -> None:
+def load(gcs_uri: str, data_type: DataType, project: str, dataset: str = DATASET, table: str = None) -> None:
     """Load a Spotify JSONL file from GCS into BigQuery (append)."""
-    table_id = f"{project}.{dataset}.{data_type.value}"
+    table_id = f"{project}.{dataset}.{table or data_type.value}"
 
     job_config = bigquery.LoadJobConfig(
         source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
