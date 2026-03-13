@@ -175,77 +175,47 @@ class SpotifyConnector:
         except Exception as e:
             raise SpotifyConnectorError(f"Error fetching recently played: {e}") from e
 
-    def fetch_saved_tracks(self, limit: int = DEFAULT_LIMIT) -> List[Dict[str, Any]]:
-        """Fetch saved tracks added since 23:00 yesterday (1-hour safety buffer)."""
+    def fetch_saved_tracks(self, **kwargs) -> List[Dict[str, Any]]:
+        """Fetch all saved tracks (full backfill, paginated)."""
         try:
-            paris_tz = ZoneInfo("Europe/Paris")
-            now_paris = datetime.now(paris_tz)
-            today_midnight_paris = now_paris.replace(hour=0, minute=0, second=0, microsecond=0)
-            yesterday_23h_paris = today_midnight_paris - timedelta(hours=1)
-
-            filtered_items = []
+            items = []
             offset = 0
             batch_size = 50
 
-            while len(filtered_items) < limit:
+            while True:
                 results = self.client.current_user_saved_tracks(limit=batch_size, offset=offset)
                 batch_items = results.get("items", [])
                 if not batch_items:
                     break
-
-                for item in batch_items:
-                    added_at_str = item.get("added_at", "")
-                    if added_at_str:
-                        added_at = datetime.fromisoformat(added_at_str.replace("Z", "+00:00"))
-                        if added_at.astimezone(paris_tz) >= yesterday_23h_paris:
-                            filtered_items.append(item)
-                        else:
-                            logger.info(f"Fetched {len(filtered_items)} saved tracks")
-                            return filtered_items[:limit]
-
+                items.extend(batch_items)
                 offset += len(batch_items)
                 if len(batch_items) < batch_size:
                     break
 
-            logger.info(f"Fetched {len(filtered_items)} saved tracks")
-            return filtered_items[:limit]
+            logger.info(f"Fetched {len(items)} saved tracks (full backfill)")
+            return items
         except Exception as e:
             raise SpotifyConnectorError(f"Error fetching saved tracks: {e}") from e
 
-    def fetch_saved_albums(self, limit: int = DEFAULT_LIMIT) -> List[Dict[str, Any]]:
-        """Fetch saved albums added since 23:00 yesterday (1-hour safety buffer)."""
+    def fetch_saved_albums(self, **kwargs) -> List[Dict[str, Any]]:
+        """Fetch all saved albums (full backfill, paginated)."""
         try:
-            paris_tz = ZoneInfo("Europe/Paris")
-            now_paris = datetime.now(paris_tz)
-            today_midnight_paris = now_paris.replace(hour=0, minute=0, second=0, microsecond=0)
-            yesterday_23h_paris = today_midnight_paris - timedelta(hours=1)
-
-            filtered_items = []
+            items = []
             offset = 0
             batch_size = 50
 
-            while len(filtered_items) < limit:
+            while True:
                 results = self.client.current_user_saved_albums(limit=batch_size, offset=offset)
                 batch_items = results.get("items", [])
                 if not batch_items:
                     break
-
-                for item in batch_items:
-                    added_at_str = item.get("added_at", "")
-                    if added_at_str:
-                        added_at = datetime.fromisoformat(added_at_str.replace("Z", "+00:00"))
-                        if added_at.astimezone(paris_tz) >= yesterday_23h_paris:
-                            filtered_items.append(item)
-                        else:
-                            logger.info(f"Fetched {len(filtered_items)} saved albums")
-                            return filtered_items[:limit]
-
+                items.extend(batch_items)
                 offset += len(batch_items)
                 if len(batch_items) < batch_size:
                     break
 
-            logger.info(f"Fetched {len(filtered_items)} saved albums")
-            return filtered_items[:limit]
+            logger.info(f"Fetched {len(items)} saved albums (full backfill)")
+            return items
         except Exception as e:
             raise SpotifyConnectorError(f"Error fetching saved albums: {e}") from e
 
