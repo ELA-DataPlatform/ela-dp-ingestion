@@ -5,6 +5,7 @@ from datetime import datetime
 
 from src.fetch.spotify import DataType as SpotifyDataType
 from src.fetch.spotify import SpotifyConnector
+from src.load.spotify import load as spotify_load
 from src.writer import write
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
@@ -65,6 +66,8 @@ def main() -> None:
             filename = f"{ts}_{args.source}_{dt_enum.value}.jsonl"
             dest = f"{output_base}/{filename}"
             write(data, dest)
+            if dest.startswith("gs://"):
+                spotify_load(dest, dt_enum, project=f"ela-dp-{args.env}")
             results["ok"].append(dt_enum.value)
         except Exception as e:
             logger.error(f"[{dt_enum.value}] fetch failed: {e}")

@@ -2,7 +2,7 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir spotipy google-cloud-storage
+RUN pip install --no-cache-dir spotipy google-cloud-storage google-cloud-bigquery
 
 COPY src/ ./src/
 COPY run.py ./
