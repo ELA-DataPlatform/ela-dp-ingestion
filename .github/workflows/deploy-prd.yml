@@ -49,18 +49,6 @@ jobs:
       contents: read
       id-token: write
 
-    strategy:
-      matrix:
-        data_type:
-          - recently_played
-          - saved_tracks
-          - saved_albums
-          - followed_artists
-          - playlists
-          - user_profile
-          - top_tracks
-          - top_artists
-
     steps:
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
@@ -68,23 +56,19 @@ jobs:
           workload_identity_provider: projects/528417450932/locations/global/workloadIdentityPools/github-pool/providers/github-provider
           service_account: data-fetcher@ela-dp-prd.iam.gserviceaccount.com
 
-      - name: Deploy Cloud Run Job — ${{ matrix.data_type }}
+      - name: Update all Cloud Run Jobs
         run: |
           IMAGE="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT }}/${{ env.AR_REPO }}/${{ env.IMAGE }}:${{ github.sha }}"
-          JOB_NAME="ela-dp-spotify-$(echo '${{ matrix.data_type }}' | tr '_' '-')"
 
-          COMMON_ARGS=(
-            --image "$IMAGE"
-            --region ${{ env.REGION }}
-            --project ${{ env.PROJECT }}
-            --args="--env" --args="prd"
-            --args="--source" --args="spotify"
-            --args="--data-types" --args="${{ matrix.data_type }}"
-            --args="--output-dir" --args="gs://ela-dp-prd"
-          )
+          JOBS=$(gcloud run jobs list \
+            --region ${{ env.REGION }} \
+            --project ${{ env.PROJECT }} \
+            --format="value(metadata.name)")
 
-          if gcloud run jobs describe "$JOB_NAME" --region ${{ env.REGION }} --project ${{ env.PROJECT }} > /dev/null 2>&1; then
-            gcloud run jobs update "$JOB_NAME" "${COMMON_ARGS[@]}"
-          else
-            gcloud run jobs create "$JOB_NAME" "${COMMON_ARGS[@]}"
-          fi
+          for JOB_NAME in $JOBS; do
+            echo "Updating $JOB_NAME..."
+            gcloud run jobs update "$JOB_NAME" \
+              --image "$IMAGE" \
+              --region ${{ env.REGION }} \
+              --project ${{ env.PROJECT }}
+          done
