@@ -10,14 +10,13 @@ env:
   PROJECT: ela-dp-dev
   AR_REPO: ela-dp-ingestion
   IMAGE: ingestion
-  JOB_NAME: ela-dp-ingestion
 
 jobs:
-  deploy:
+  build:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write  # required for Workload Identity Federation
+      id-token: write
 
     steps:
       - uses: actions/checkout@v4
@@ -43,21 +42,33 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Deploy Cloud Run Job
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/875275187211/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+          service_account: data-fetcher@ela-dp-dev.iam.gserviceaccount.com
+
+      - name: Update all Cloud Run Jobs
         run: |
           IMAGE="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT }}/${{ env.AR_REPO }}/${{ env.IMAGE }}:${{ github.sha }}"
-          if gcloud run jobs describe ${{ env.JOB_NAME }} --region ${{ env.REGION }} --project ${{ env.PROJECT }} > /dev/null 2>&1; then
-            gcloud run jobs update ${{ env.JOB_NAME }} \
+
+          JOBS=$(gcloud run jobs list \
+            --region ${{ env.REGION }} \
+            --project ${{ env.PROJECT }} \
+            --format="value(metadata.name)")
+
+          for JOB_NAME in $JOBS; do
+            echo "Updating $JOB_NAME..."
+            gcloud run jobs update "$JOB_NAME" \
               --image "$IMAGE" \
               --region ${{ env.REGION }} \
               --project ${{ env.PROJECT }}
-          else
-            gcloud run jobs create ${{ env.JOB_NAME }} \
-              --image "$IMAGE" \
-              --region ${{ env.REGION }} \
-              --project ${{ env.PROJECT }} \
-              --args="--env" --args="dev" \
-              --args="--source" --args="spotify" \
-              --args="--data-types" --args="recently_played" \
-              --args="--output-dir" --args="gs://ela-dp-dev"
-          fi
+          done
