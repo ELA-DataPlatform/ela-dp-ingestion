@@ -16,19 +16,29 @@ from src.writer import write
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-CONFIG_PATH = Path(__file__).parent / "config" / "ingestion.yaml"
+SOURCES_CONFIG_DIR = Path(__file__).parent / "config" / "sources"
+LOADING_CONFIG_PATH = Path(__file__).parent / "config" / "loading.yaml"
 
 
-def _load_ingestion_config() -> dict:
-    if not CONFIG_PATH.exists():
+def _load_data_type_config(source: str, data_type_value: str) -> dict:
+    path = SOURCES_CONFIG_DIR / source / f"{data_type_value}.yaml"
+    if not path.exists():
         return {}
-    with open(CONFIG_PATH) as f:
+    with open(path) as f:
         return yaml.safe_load(f) or {}
 
 
-def _archive_gcs_file(uri: str, project: str) -> None:
-    """Move a GCS file from /landing/ to /archive/ after successful ingestion."""
-    archive_uri = uri.replace("/landing/", "/archive/", 1)
+def _load_loading_config() -> dict:
+    if not LOADING_CONFIG_PATH.exists():
+        return {}
+    with open(LOADING_CONFIG_PATH) as f:
+        return yaml.safe_load(f) or {}
+
+
+def _archive_gcs_file(uri: str, project: str, data_type: str = "") -> None:
+    """Move a GCS file from /landing/ to /archive/{data_type}/ after successful ingestion."""
+    archive_dir = f"/archive/{data_type}/" if data_type else "/archive/"
+    archive_uri = uri.replace("/landing/", archive_dir, 1)
     if archive_uri == uri:
         logger.warning(f"No /landing/ segment in {uri}, skipping archive")
         return
@@ -43,13 +53,25 @@ def _archive_gcs_file(uri: str, project: str) -> None:
     logger.info(f"Archived {uri} → {archive_uri}")
 
 
-def _get_destination(config: dict, source: str, data_type_value: str, env: str) -> tuple:
-    mapping = config.get(source, {}).get(data_type_value, {})
+def _get_destination(loading_config: dict, source: str, data_type_value: str, env: str) -> tuple:
+    mapping = loading_config.get(source, {}).get(data_type_value, {})
     dataset = mapping.get("dataset")
     table = mapping.get("table")
     if dataset:
         dataset = dataset.format(env=env)
     return dataset, table
+
+
+def _get_schema(source: str, data_type_value: str) -> list | None:
+    return _load_data_type_config(source, data_type_value).get("schema")
+
+
+def _get_filename_pattern(loading_config: dict, source: str) -> str:
+    return loading_config.get(source, {}).get("filename_pattern", "{ts}_{source}_{data_type}.jsonl")
+
+
+def _build_filename(pattern: str, ts: str, source: str, data_type: str) -> str:
+    return pattern.format(ts=ts, source=source, data_type=data_type)
 
 
 SOURCE_MAP = {
@@ -69,10 +91,14 @@ def _list_gcs_jsonl(gcs_prefix: str, project: str) -> list:
     return [f"gs://{bucket_name}/{b.name}" for b in blobs if b.name.endswith(".jsonl")]
 
 
-def _detect_data_type(uri: str, source: str, valid: dict):
-    """Extract data_type from filename pattern: {ts}_{source}_{data_type}.jsonl"""
+def _detect_data_type(uri: str, source: str, valid: dict, pattern: str):
+    """Extract data_type from filename using the configured pattern."""
     filename = uri.rsplit("/", 1)[-1]
-    match = re.search(rf"_{re.escape(source)}_(.+)\.jsonl$", filename)
+    regex = re.escape(pattern)
+    regex = regex.replace(r"\{ts\}", r"[\d_]+")
+    regex = regex.replace(r"\{source\}", re.escape(source))
+    regex = regex.replace(r"\{data_type\}", r"(.+)")
+    match = re.search(regex, filename)
     if match:
         return valid.get(match.group(1))
     return None
@@ -101,7 +127,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    ingestion_config = _load_ingestion_config()
+    loading_config = _load_loading_config()
     project = f"ela-dp-{args.env}"
 
     source_cfg = SOURCE_MAP[args.source]
@@ -109,6 +135,7 @@ def main() -> None:
     connector_cls = source_cfg["connector_cls"]
 
     valid = {dt.value: dt for dt in data_type_enum}
+    filename_pattern = _get_filename_pattern(loading_config, args.source)
 
     # --- LOAD ONLY ---
     if args.mode == "load":
@@ -119,24 +146,27 @@ def main() -> None:
         if not files:
             logger.error(f"No .jsonl files found in {args.gcs_dir}")
             sys.exit(1)
-        results = {"ok": [], "error": []}
+        results = {"ok": [], "error": [], "skipped": []}
         for uri in files:
-            dt_enum = _detect_data_type(uri, args.source, valid)
+            dt_enum = _detect_data_type(uri, args.source, valid, filename_pattern)
             if dt_enum is None:
                 logger.warning(f"Cannot detect data_type from {uri}, skipping")
+                results["skipped"].append(uri)
                 continue
-            dataset, table = _get_destination(ingestion_config, args.source, dt_enum.value, args.env)
+            dataset, table = _get_destination(loading_config, args.source, dt_enum.value, args.env)
+            schema = _get_schema(args.source, dt_enum.value)
             try:
                 spotify_load(uri, dt_enum, project=project,
                              **({} if dataset is None else {"dataset": dataset}),
-                             **({} if table is None else {"table": table}))
-                _archive_gcs_file(uri, project=project)
+                             **({} if table is None else {"table": table}),
+                             **({} if schema is None else {"schema": schema}))
+                _archive_gcs_file(uri, project=project, data_type=dt_enum.value)
                 results["ok"].append(uri)
             except Exception as e:
                 logger.error(f"[{uri}] load failed: {e}")
                 results["error"].append(uri)
-        logger.info(f"Done — ok: {len(results['ok'])}, errors: {len(results['error'])}")
-        if results["error"]:
+        logger.info(f"Done — ok: {len(results['ok'])}, skipped: {len(results['skipped'])}, errors: {len(results['error'])}")
+        if results["error"] or results["skipped"]:
             sys.exit(1)
         return
 
@@ -163,14 +193,16 @@ def main() -> None:
             if isinstance(data, dict):
                 data = [data]
 
-            filename = f"{ts}_{args.source}_{dt_enum.value}.jsonl"
+            filename = _build_filename(filename_pattern, ts, args.source, dt_enum.value)
             dest = f"{output_base}/{filename}"
             write(data, dest)
             if args.mode == "all" and dest.startswith("gs://"):
-                dataset, table = _get_destination(ingestion_config, args.source, dt_enum.value, args.env)
+                dataset, table = _get_destination(loading_config, args.source, dt_enum.value, args.env)
+                schema = _get_schema(args.source, dt_enum.value)
                 spotify_load(dest, dt_enum, project=project,
                              **({} if dataset is None else {"dataset": dataset}),
-                             **({} if table is None else {"table": table}))
+                             **({} if table is None else {"table": table}),
+                             **({} if schema is None else {"schema": schema}))
             results["ok"].append(dt_enum.value)
         except Exception as e:
             logger.error(f"[{dt_enum.value}] failed: {e}")

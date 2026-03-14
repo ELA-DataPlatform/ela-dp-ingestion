@@ -1,4 +1,5 @@
 spotify:
+  filename_pattern: "{ts}_{source}_{data_type}.jsonl"
   recently_played:
     dataset: dp_lake_spotify_{env}
     table: normalized_recently_played
