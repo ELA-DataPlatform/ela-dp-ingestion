@@ -51,7 +51,7 @@ def load(
             bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION,
         ],
         time_partitioning=bigquery.TimePartitioning(
-            type_=bigquery.TimePartitioningType.WEEK,
+            type_=bigquery.TimePartitioningType.MONTH,
             field="_ingested_at",
         ),
     )
