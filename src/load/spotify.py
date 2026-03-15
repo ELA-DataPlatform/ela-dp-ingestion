@@ -33,49 +33,34 @@ def _ensure_dataset(client: bigquery.Client, project: str, dataset: str) -> None
         logger.info(f"Created dataset {project}.{dataset}")
 
 
-def _build_bq_schema(fields: list) -> list:
-    result = []
-    for f in fields:
-        mode = f.get("mode", "NULLABLE")
-        sub_fields = f.get("fields")
-        if sub_fields:
-            nested = _build_bq_schema(sub_fields)
-            result.append(bigquery.SchemaField(f["name"], f["type"], mode=mode, fields=nested))
-        else:
-            result.append(bigquery.SchemaField(f["name"], f["type"], mode=mode))
-    return result
-
-
 def load(
     gcs_uri: str,
     data_type: DataType,
     project: str,
     dataset: str = DATASET,
     table: str = None,
-    schema: list = None,
 ) -> None:
-    """Load a Spotify JSONL file from GCS into BigQuery (append)."""
+    """Load a Spotify JSONL file from GCS into BigQuery (append, autodetect)."""
     table_id = f"{project}.{dataset}.{table or data_type.value}"
 
     job_config = bigquery.LoadJobConfig(
         source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
         write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
+        autodetect=True,
+        schema_update_options=[
+            bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION,
+        ],
         time_partitioning=bigquery.TimePartitioning(
-            type_=bigquery.TimePartitioningType.DAY,
+            type_=bigquery.TimePartitioningType.WEEK,
+            field="_ingested_at",
         ),
     )
-
-    if schema:
-        job_config.schema = _build_bq_schema(schema)
-        job_config.autodetect = False
-    else:
-        job_config.autodetect = True
 
     try:
         client = bigquery.Client(project=project)
         _ensure_dataset(client, project, dataset)
         load_job = client.load_table_from_uri(gcs_uri, table_id, job_config=job_config)
         load_job.result()
-        logger.info(f"Loaded {gcs_uri} → {table_id} (schema={'explicit' if schema else 'autodetect'})")
+        logger.info(f"Loaded {gcs_uri} → {table_id}")
     except Exception as e:
         raise SpotifyLoaderError(f"Failed to load {gcs_uri} into {table_id}: {e}") from e

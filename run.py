@@ -16,16 +16,7 @@ from src.writer import write
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-SOURCES_CONFIG_DIR = Path(__file__).parent / "config" / "sources"
 LOADING_CONFIG_PATH = Path(__file__).parent / "config" / "loading.yaml"
-
-
-def _load_data_type_config(source: str, data_type_value: str) -> dict:
-    path = SOURCES_CONFIG_DIR / source / f"{data_type_value}.yaml"
-    if not path.exists():
-        return {}
-    with open(path) as f:
-        return yaml.safe_load(f) or {}
 
 
 def _load_loading_config() -> dict:
@@ -60,10 +51,6 @@ def _get_destination(loading_config: dict, source: str, data_type_value: str, en
     if dataset:
         dataset = dataset.format(env=env)
     return dataset, table
-
-
-def _get_schema(source: str, data_type_value: str) -> list | None:
-    return _load_data_type_config(source, data_type_value).get("schema")
 
 
 def _get_filename_pattern(loading_config: dict, source: str) -> str:
@@ -154,12 +141,10 @@ def main() -> None:
                 results["skipped"].append(uri)
                 continue
             dataset, table = _get_destination(loading_config, args.source, dt_enum.value, args.env)
-            schema = _get_schema(args.source, dt_enum.value)
             try:
                 spotify_load(uri, dt_enum, project=project,
                              **({} if dataset is None else {"dataset": dataset}),
-                             **({} if table is None else {"table": table}),
-                             **({} if schema is None else {"schema": schema}))
+                             **({} if table is None else {"table": table}))
                 _archive_gcs_file(uri, project=project, data_type=dt_enum.value)
                 results["ok"].append(uri)
             except Exception as e:
@@ -198,11 +183,9 @@ def main() -> None:
             write(data, dest)
             if args.mode == "all" and dest.startswith("gs://"):
                 dataset, table = _get_destination(loading_config, args.source, dt_enum.value, args.env)
-                schema = _get_schema(args.source, dt_enum.value)
                 spotify_load(dest, dt_enum, project=project,
                              **({} if dataset is None else {"dataset": dataset}),
-                             **({} if table is None else {"table": table}),
-                             **({} if schema is None else {"schema": schema}))
+                             **({} if table is None else {"table": table}))
             results["ok"].append(dt_enum.value)
         except Exception as e:
             logger.error(f"[{dt_enum.value}] failed: {e}")
