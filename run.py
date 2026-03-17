@@ -8,8 +8,11 @@ from pathlib import Path
 import yaml
 from google.cloud import storage
 
+from src.fetch.garmin import DataType as GarminDataType
+from src.fetch.garmin import GarminConnector
 from src.fetch.spotify import DataType as SpotifyDataType
 from src.fetch.spotify import SpotifyConnector
+from src.load.garmin import load as garmin_load
 from src.load.spotify import load as spotify_load
 from src.writer import write
 
@@ -65,6 +68,12 @@ SOURCE_MAP = {
     "spotify": {
         "connector_cls": SpotifyConnector,
         "data_type_enum": SpotifyDataType,
+        "load_fn": spotify_load,
+    },
+    "garmin": {
+        "connector_cls": GarminConnector,
+        "data_type_enum": GarminDataType,
+        "load_fn": garmin_load,
     },
 }
 
@@ -100,6 +109,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data-types", nargs="+", metavar="DATA_TYPE",
                         help="Required for fetch/all. Auto-detected from filenames in load mode.")
     parser.add_argument("--limit", type=int, default=50)
+    parser.add_argument("--days", type=int, default=30,
+                        help="Number of days to fetch (Garmin only)")
     parser.add_argument(
         "--output-dir",
         default="/app/output",
@@ -120,6 +131,7 @@ def main() -> None:
     source_cfg = SOURCE_MAP[args.source]
     data_type_enum = source_cfg["data_type_enum"]
     connector_cls = source_cfg["connector_cls"]
+    load_fn = source_cfg["load_fn"]
 
     valid = {dt.value: dt for dt in data_type_enum}
     filename_pattern = _get_filename_pattern(loading_config, args.source)
@@ -142,9 +154,9 @@ def main() -> None:
                 continue
             dataset, table = _get_destination(loading_config, args.source, dt_enum.value, args.env)
             try:
-                spotify_load(uri, dt_enum, project=project,
-                             **({} if dataset is None else {"dataset": dataset}),
-                             **({} if table is None else {"table": table}))
+                load_fn(uri, dt_enum, project=project,
+                        **({} if dataset is None else {"dataset": dataset}),
+                        **({} if table is None else {"table": table}))
                 _archive_gcs_file(uri, project=project, data_type=dt_enum.value)
                 results["ok"].append(uri)
             except Exception as e:
@@ -174,7 +186,7 @@ def main() -> None:
 
     for dt_enum in data_type_enums:
         try:
-            data = connector.fetch_data(dt_enum, limit=args.limit)
+            data = connector.fetch_data(dt_enum, limit=args.limit, days=args.days)
             if isinstance(data, dict):
                 data = [data]
 
@@ -183,9 +195,9 @@ def main() -> None:
             write(data, dest)
             if args.mode == "all" and dest.startswith("gs://"):
                 dataset, table = _get_destination(loading_config, args.source, dt_enum.value, args.env)
-                spotify_load(dest, dt_enum, project=project,
-                             **({} if dataset is None else {"dataset": dataset}),
-                             **({} if table is None else {"table": table}))
+                load_fn(dest, dt_enum, project=project,
+                        **({} if dataset is None else {"dataset": dataset}),
+                        **({} if table is None else {"table": table}))
             results["ok"].append(dt_enum.value)
         except Exception as e:
             logger.error(f"[{dt_enum.value}] failed: {e}")

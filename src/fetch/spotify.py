@@ -309,4 +309,6 @@ class SpotifyConnector:
         if data_type not in method_map:
             raise SpotifyConnectorError(f"Unsupported data type: {data_type}")
 
+        # Filter out kwargs not relevant to Spotify (e.g. days from Garmin)
+        kwargs.pop("days", None)
         return method_map[data_type](**kwargs)
