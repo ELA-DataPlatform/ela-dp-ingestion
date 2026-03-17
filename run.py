@@ -190,6 +190,11 @@ def main() -> None:
             if isinstance(data, dict):
                 data = [data]
 
+            if not data:
+                logger.warning(f"[{dt_enum.value}] no data returned, skipping write/load")
+                results["ok"].append(dt_enum.value)
+                continue
+
             filename = _build_filename(filename_pattern, ts, args.source, dt_enum.value)
             dest = f"{output_base}/{filename}"
             write(data, dest)
