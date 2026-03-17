@@ -1,0 +1,116 @@
+spotify:
+  filename_pattern: "{ts}_{source}_{data_type}.jsonl"
+  recently_played:
+    dataset: dp_lake_spotify_{env}
+    table: normalized_recently_played
+  saved_tracks:
+    dataset: dp_lake_spotify_{env}
+    table: normalized_saved_tracks
+  saved_albums:
+    dataset: dp_lake_spotify_{env}
+    table: normalized_saved_albums
+  followed_artists:
+    dataset: dp_lake_spotify_{env}
+    table: normalized_followed_artists
+  playlists:
+    dataset: dp_lake_spotify_{env}
+    table: normalized_playlists
+  user_profile:
+    dataset: dp_lake_spotify_{env}
+    table: normalized_user_profile
+  top_tracks:
+    dataset: dp_lake_spotify_{env}
+    table: normalized_top_tracks
+  top_artists:
+    dataset: dp_lake_spotify_{env}
+    table: normalized_top_artists
+
+garmin:
+  filename_pattern: "{ts}_{source}_{data_type}.jsonl"
+  activities:
+    dataset: dp_lake_garmin_{env}
+    table: normalized_activities
+  activity_details:
+    dataset: dp_lake_garmin_{env}
+    table: normalized_activity_details
+  activity_splits:
+    dataset: dp_lake_garmin_{env}
+    table: normalized_activity_splits
+  activity_weather:
+    dataset: dp_lake_garmin_{env}
+    table: normalized_activity_weather
+  activity_hr_zones:
+    dataset: dp_lake_garmin_{env}
+    table: normalized_activity_hr_zones
+  activity_exercise_sets:
+    dataset: dp_lake_garmin_{env}
+    table: normalized_activity_exercise_sets
+  sleep:
+    dataset: dp_lake_garmin_{env}
+    table: normalized_sleep
+  steps:
+    dataset: dp_lake_garmin_{env}
+    table: normalized_steps
+  heart_rate:
+    dataset: dp_lake_garmin_{env}
+    table: normalized_heart_rate
+  body_battery:
+    dataset: dp_lake_garmin_{env}
+    table: normalized_body_battery
+  stress:
+    dataset: dp_lake_garmin_{env}
+    table: normalized_stress
+  weight:
+    dataset: dp_lake_garmin_{env}
+    table: normalized_weight
+  body_composition:
+    dataset: dp_lake_garmin_{env}
+    table: normalized_body_composition
+  user_summary:
+    dataset: dp_lake_garmin_{env}
+    table: normalized_user_summary
+  stats_and_body:
+    dataset: dp_lake_garmin_{env}
+    table: normalized_stats_and_body
+  training_readiness:
+    dataset: dp_lake_garmin_{env}
+    table: normalized_training_readiness
+  rhr_daily:
+    dataset: dp_lake_garmin_{env}
+    table: normalized_rhr_daily
+  spo2:
+    dataset: dp_lake_garmin_{env}
+    table: normalized_spo2
+  respiration:
+    dataset: dp_lake_garmin_{env}
+    table: normalized_respiration
+  intensity_minutes:
+    dataset: dp_lake_garmin_{env}
+    table: normalized_intensity_minutes
+  max_metrics:
+    dataset: dp_lake_garmin_{env}
+    table: normalized_max_metrics
+  all_day_events:
+    dataset: dp_lake_garmin_{env}
+    table: normalized_all_day_events
+  device_info:
+    dataset: dp_lake_garmin_{env}
+    table: normalized_device_info
+  training_status:
+    dataset: dp_lake_garmin_{env}
+    table: normalized_training_status
+  hrv:
+    dataset: dp_lake_garmin_{env}
+    table: normalized_hrv
+  race_predictions:
+    dataset: dp_lake_garmin_{env}
+    table: normalized_race_predictions
+  floors:
+    dataset: dp_lake_garmin_{env}
+    table: normalized_floors
+  endurance_score:
+    dataset: dp_lake_garmin_{env}
+    table: normalized_endurance_score
+  hill_score:
+    dataset: dp_lake_garmin_{env}
+    table: normalized_hill_score
