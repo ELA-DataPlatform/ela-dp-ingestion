@@ -43,10 +43,6 @@ class DataType(Enum):
     USER_PROFILE = "user_profile"
     TOP_TRACKS = "top_tracks"
     TOP_ARTISTS = "top_artists"
-    ARTIST_DETAIL = "artist_detail"
-    ALBUM_DETAIL = "album_detail"
-    ALBUM_TRACKS = "album_tracks"
-    ARTIST_ALBUMS = "artist_albums"
 
 
 @dataclass
@@ -77,7 +73,6 @@ class SpotifyConnector:
         DataType.USER_PROFILE: "user-read-private user-read-email",
         DataType.TOP_TRACKS: "user-top-read",
         DataType.TOP_ARTISTS: "user-top-read",
-        # ARTIST_DETAIL and ALBUM_DETAIL use public endpoints, no OAuth scope required
     }
 
     def __init__(self, config: SpotifyConfig):
@@ -296,80 +291,6 @@ class SpotifyConnector:
         except Exception as e:
             raise SpotifyConnectorError(f"Error fetching top artists: {e}") from e
 
-    def fetch_artist_details(self, ids: List[str], **kwargs) -> List[Dict[str, Any]]:
-        """Fetch artist details for a list of Spotify artist IDs (batched, 50 per call)."""
-        if not ids:
-            return []
-        try:
-            results = []
-            batch_size = 50
-            for i in range(0, len(ids), batch_size):
-                batch = ids[i : i + batch_size]
-                response = self.client.artists(batch)
-                results.extend(response.get("artists", []))
-            logger.info(f"Fetched details for {len(results)} artists")
-            return results
-        except Exception as e:
-            raise SpotifyConnectorError(f"Error fetching artist details: {e}") from e
-
-    def fetch_album_details(self, ids: List[str], **kwargs) -> List[Dict[str, Any]]:
-        """Fetch album details for a list of Spotify album IDs (batched, 20 per call)."""
-        if not ids:
-            return []
-        try:
-            results = []
-            batch_size = 20  # Spotify /albums endpoint limit
-            for i in range(0, len(ids), batch_size):
-                batch = ids[i : i + batch_size]
-                response = self.client.albums(batch)
-                results.extend(a for a in response.get("albums", []) if a is not None)
-            logger.info(f"Fetched details for {len(results)} albums")
-            return results
-        except Exception as e:
-            raise SpotifyConnectorError(f"Error fetching album details: {e}") from e
-
-    def fetch_album_tracks(self, ids: List[str], **kwargs) -> List[Dict[str, Any]]:
-        """Fetch all tracks for each album ID (paginated). Injects album_id into each record."""
-        results = []
-        batch_size = 50
-        for album_id in ids:
-            try:
-                offset = 0
-                while True:
-                    response = self.client.album_tracks(album_id, limit=batch_size, offset=offset)
-                    items = response.get("items", [])
-                    for track in items:
-                        track["album_id"] = album_id
-                    results.extend(items)
-                    offset += len(items)
-                    if len(items) < batch_size:
-                        break
-            except Exception as e:
-                raise SpotifyConnectorError(f"Error fetching tracks for album {album_id}: {e}") from e
-        logger.info(f"Fetched {len(results)} tracks across {len(ids)} albums")
-        return results
-
-    def fetch_artist_albums(self, ids: List[str], **kwargs) -> List[Dict[str, Any]]:
-        """Fetch all albums for each artist ID (paginated). Injects artist_id into each record."""
-        results = []
-        batch_size = 50
-        for artist_id in ids:
-            try:
-                offset = 0
-                while True:
-                    response = self.client.artist_albums(artist_id, album_type="album", limit=batch_size, offset=offset)
-                    items = response.get("items", [])
-                    for album in items:
-                        album["artist_id"] = artist_id
-                    results.extend(items)
-                    offset += len(items)
-                    if len(items) < batch_size:
-                        break
-            except Exception as e:
-                raise SpotifyConnectorError(f"Error fetching albums for artist {artist_id}: {e}") from e
-        logger.info(f"Fetched {len(results)} albums across {len(ids)} artists")
-        return results
-
     def fetch_data(
         self, data_type: DataType, **kwargs
     ) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
@@ -383,10 +304,6 @@ class SpotifyConnector:
             DataType.USER_PROFILE: self.fetch_user_profile,
             DataType.TOP_TRACKS: self.fetch_top_tracks,
             DataType.TOP_ARTISTS: self.fetch_top_artists,
-            DataType.ARTIST_DETAIL: self.fetch_artist_details,
-            DataType.ALBUM_DETAIL: self.fetch_album_details,
-            DataType.ALBUM_TRACKS: self.fetch_album_tracks,
-            DataType.ARTIST_ALBUMS: self.fetch_artist_albums,
         }
 
         if data_type not in method_map:
