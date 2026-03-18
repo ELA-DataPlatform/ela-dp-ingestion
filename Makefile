@@ -18,6 +18,8 @@ fetch: build
 	$(if $(filter gs://%,$(OUTPUT)), \
 	  docker run --rm \
 	    $(ENV_FILE_FLAG) \
+	    -v "$(HOME)/.config/gcloud:/root/.config/gcloud:ro" \
+	    -e GOOGLE_APPLICATION_CREDENTIALS=/root/.config/gcloud/application_default_credentials.json \
 	    $(IMAGE) \
 	    --mode fetch \
 	    --env $(ENV) \
@@ -50,6 +52,8 @@ run: build
 	$(if $(filter gs://%,$(OUTPUT)), \
 	  docker run --rm \
 	    $(ENV_FILE_FLAG) \
+	    -v "$(HOME)/.config/gcloud:/root/.config/gcloud:ro" \
+	    -e GOOGLE_APPLICATION_CREDENTIALS=/root/.config/gcloud/application_default_credentials.json \
 	    $(IMAGE) \
 	    --mode all \
 	    --env $(ENV) \
