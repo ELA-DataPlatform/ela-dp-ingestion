@@ -211,3 +211,4 @@ data/
 __pycache__/
 .DS_Store
 old/
+output/
