@@ -330,7 +330,10 @@ class SpotifyConnector:
 
     def fetch_album_tracks(self, ids: List[str], **kwargs) -> List[Dict[str, Any]]:
         """Fetch all tracks for each album ID (paginated). Injects album_id into each record."""
+        import time
+
         results = []
+        failed = []
         batch_size = 50
         for album_id in ids:
             try:
@@ -344,14 +347,22 @@ class SpotifyConnector:
                     offset += len(items)
                     if len(items) < batch_size:
                         break
+                time.sleep(0.1)
             except Exception as e:
-                raise SpotifyConnectorError(f"Error fetching tracks for album {album_id}: {e}") from e
-        logger.info(f"Fetched {len(results)} tracks across {len(ids)} albums")
+                logger.warning(f"Skipping album {album_id}: {e}")
+                failed.append(album_id)
+
+        if failed:
+            logger.warning(f"Failed to fetch tracks for {len(failed)}/{len(ids)} albums: {failed}")
+        logger.info(f"Fetched {len(results)} tracks across {len(ids) - len(failed)} albums")
         return results
 
     def fetch_artist_albums(self, ids: List[str], **kwargs) -> List[Dict[str, Any]]:
         """Fetch all albums for each artist ID (paginated). Injects artist_id into each record."""
+        import time
+
         results = []
+        failed = []
         batch_size = 50
         for artist_id in ids:
             try:
@@ -365,9 +376,14 @@ class SpotifyConnector:
                     offset += len(items)
                     if len(items) < batch_size:
                         break
+                time.sleep(0.1)
             except Exception as e:
-                raise SpotifyConnectorError(f"Error fetching albums for artist {artist_id}: {e}") from e
-        logger.info(f"Fetched {len(results)} albums across {len(ids)} artists")
+                logger.warning(f"Skipping artist {artist_id}: {e}")
+                failed.append(artist_id)
+
+        if failed:
+            logger.warning(f"Failed to fetch albums for {len(failed)}/{len(ids)} artists: {failed}")
+        logger.info(f"Fetched {len(results)} albums across {len(ids) - len(failed)} artists")
         return results
 
     def fetch_data(
