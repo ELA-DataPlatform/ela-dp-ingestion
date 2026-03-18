@@ -37,6 +37,10 @@ def write_gcs(data: list, gcs_uri: str) -> None:
 
 def write(data: list, dest: str) -> None:
     """Write data to either a local path or a GCS URI (gs://...)."""
+    if not data:
+        logger.info(f"No data to write, skipping file creation → {dest}")
+        return
+
     if dest.startswith("gs://"):
         write_gcs(data, dest)
     else:
