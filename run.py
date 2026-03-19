@@ -143,8 +143,8 @@ def main() -> None:
             sys.exit(1)
         files = _list_gcs_jsonl(args.gcs_dir, project=project)
         if not files:
-            logger.error(f"No .jsonl files found in {args.gcs_dir}")
-            sys.exit(1)
+            logger.info(f"No .jsonl files found in {args.gcs_dir}, nothing to load")
+            return
         results = {"ok": [], "error": [], "skipped": []}
         for uri in files:
             dt_enum = _detect_data_type(uri, args.source, valid, filename_pattern)

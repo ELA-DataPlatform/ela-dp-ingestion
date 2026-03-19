@@ -28,7 +28,7 @@ from garminconnect import Garmin
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_DAYS = 30
+DEFAULT_DAYS = 3
 
 
 class DataType(Enum):
@@ -203,6 +203,19 @@ class GarminConnector:
             except Exception as e:
                 raise GarminConnectorError(f"Authentication failed: {e}") from e
 
+    def _call_with_retry(self, fn: Callable, *args, max_retries: int = 3, **kwargs) -> Any:
+        """Call a Garmin API function with retry and exponential backoff on 429 errors."""
+        for attempt in range(max_retries + 1):
+            try:
+                return fn(*args, **kwargs)
+            except Exception as e:
+                if "429" in str(e) and attempt < max_retries:
+                    wait = 2 ** (attempt + 1)  # 2s, 4s, 8s
+                    logger.warning(f"429 Too Many Requests, retry {attempt + 1}/{max_retries} in {wait}s...")
+                    time.sleep(wait)
+                else:
+                    raise
+
     @property
     def client(self) -> Garmin:
         if self._client is None:
@@ -258,7 +271,7 @@ class GarminConnector:
         while current <= end:
             date_str = current.strftime("%Y-%m-%d")
             try:
-                data = method(date_str)
+                data = self._call_with_retry(method, date_str)
                 if data:
                     data = flatten_nested_arrays(data, path=f"{metric_name}.{date_str}")
 
@@ -310,10 +323,10 @@ class GarminConnector:
 
                 chunk_data = None
                 try:
-                    chunk_data = method(start_str, end_str)
+                    chunk_data = self._call_with_retry(method, start_str, end_str)
                 except TypeError:
                     logger.debug(f"Method {method.__name__} rejected range args, trying without")
-                    chunk_data = method()
+                    chunk_data = self._call_with_retry(method)
                     current_start = end + timedelta(days=1)
 
                 if chunk_data:
@@ -372,7 +385,7 @@ class GarminConnector:
     def _fetch_simple(self, method: Callable, metric_name: str) -> List[Dict[str, Any]]:
         """Fetch data without parameters."""
         try:
-            data = method()
+            data = self._call_with_retry(method)
             if not data:
                 return []
 
@@ -401,7 +414,8 @@ class GarminConnector:
     ) -> List[Dict[str, Any]]:
         """Special handling for activity details (requires 2 steps)."""
         try:
-            activities = client.get_activities_by_date(
+            activities = self._call_with_retry(
+                client.get_activities_by_date,
                 start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
             )
 
@@ -412,7 +426,7 @@ class GarminConnector:
                     continue
 
                 try:
-                    details = client.get_activity_details(activity_id, maxchart=2000, maxpoly=4000)
+                    details = self._call_with_retry(client.get_activity_details, activity_id, maxchart=2000, maxpoly=4000)
 
                     clean_activity = flatten_nested_arrays(activity, path=f"activity_{activity_id}")
                     clean_details = flatten_nested_arrays(details, path=f"details_{activity_id}")
@@ -443,7 +457,8 @@ class GarminConnector:
     ) -> List[Dict[str, Any]]:
         """Generic fetcher for activity-related subdata (splits, weather, etc)."""
         try:
-            activities = client.get_activities_by_date(
+            activities = self._call_with_retry(
+                client.get_activities_by_date,
                 start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
             )
 
@@ -457,9 +472,9 @@ class GarminConnector:
 
                 try:
                     if metric_name == "activity_splits":
-                        splits = client.get_activity_splits(activity_id)
-                        typed_splits = client.get_activity_typed_splits(activity_id)
-                        split_summaries = client.get_activity_split_summaries(activity_id)
+                        splits = self._call_with_retry(client.get_activity_splits, activity_id)
+                        typed_splits = self._call_with_retry(client.get_activity_typed_splits, activity_id)
+                        split_summaries = self._call_with_retry(client.get_activity_split_summaries, activity_id)
 
                         clean_splits = flatten_nested_arrays(splits, path=f"splits_{activity_id}")
                         clean_typed = flatten_nested_arrays(typed_splits, path=f"typed_splits_{activity_id}")
@@ -476,7 +491,7 @@ class GarminConnector:
                             "data_type": metric_name,
                         }
                     else:
-                        subdata = method(activity_id)
+                        subdata = self._call_with_retry(method, activity_id)
                         if not subdata:
                             continue
 
