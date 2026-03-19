@@ -4,10 +4,9 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import List
 
 import yaml
-from google.cloud import bigquery, storage
+from google.cloud import storage
 
 from src.fetch.garmin import DataType as GarminDataType
 from src.fetch.garmin import GarminConnector
@@ -55,25 +54,6 @@ def _get_destination(loading_config: dict, source: str, data_type_value: str, en
     if dataset:
         dataset = dataset.format(env=env)
     return dataset, table
-
-
-def _get_ids_source(loading_config: dict, source: str, data_type_value: str, env: str) -> tuple:
-    mapping = loading_config.get(source, {}).get(data_type_value, {})
-    table = mapping.get("ids_source_table")
-    column = mapping.get("ids_source_column", "id")
-    if table:
-        table = table.format(env=env)
-    return table, column
-
-
-def _resolve_ids_from_bq(project: str, table: str, column: str) -> List[str]:
-    """Query a BQ table/view and return all values from the given column as a list of IDs."""
-    client = bigquery.Client(project=project)
-    query = f"SELECT `{column}` FROM `{project}.{table}`"
-    rows = client.query(query).result()
-    ids = [row[0] for row in rows if row[0]]
-    logger.info(f"Resolved {len(ids)} IDs from {table}")
-    return ids
 
 
 def _get_filename_pattern(loading_config: dict, source: str) -> str:
@@ -139,12 +119,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--gcs-dir",
         help="GCS folder to ingest (required for --mode load)",
-    )
-    parser.add_argument(
-        "--ids",
-        nargs="+",
-        metavar="ID",
-        help="Explicit IDs to fetch (bypasses BQ lookup, for artist_detail / album_detail)",
     )
     return parser.parse_args()
 
@@ -212,20 +186,7 @@ def main() -> None:
 
     for dt_enum in data_type_enums:
         try:
-            extra_kwargs = {}
-            ids_table, ids_column = _get_ids_source(loading_config, args.source, dt_enum.value, args.env)
-            if ids_table:
-                if args.ids:
-                    ids = args.ids
-                    logger.info(f"[{dt_enum.value}] using {len(ids)} IDs from --ids argument")
-                else:
-                    ids = _resolve_ids_from_bq(project, ids_table, ids_column)
-                if not ids:
-                    logger.warning(f"[{dt_enum.value}] no IDs found, skipping")
-                    results["ok"].append(dt_enum.value)
-                    continue
-                extra_kwargs["ids"] = ids
-            data = connector.fetch_data(dt_enum, limit=args.limit, days=args.days, **extra_kwargs)
+            data = connector.fetch_data(dt_enum, limit=args.limit, days=args.days)
             if isinstance(data, dict):
                 data = [data]
 
