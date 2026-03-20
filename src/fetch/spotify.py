@@ -17,12 +17,9 @@ Supported data types:
 import logging
 import os
 from dataclasses import dataclass
-from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
-from zoneinfo import ZoneInfo
-
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 
@@ -160,17 +157,11 @@ class SpotifyConnector:
         return self._client
 
     def fetch_recently_played(self, limit: int = DEFAULT_LIMIT) -> List[Dict[str, Any]]:
-        """Fetch recently played tracks since 23:00 yesterday (1-hour safety buffer)."""
+        """Fetch the last played tracks (up to limit). Deduplication is handled in BQ."""
         try:
-            paris_tz = ZoneInfo("Europe/Paris")
-            now_paris = datetime.now(paris_tz)
-            today_midnight_paris = now_paris.replace(hour=0, minute=0, second=0, microsecond=0)
-            yesterday_23h_paris = today_midnight_paris - timedelta(hours=1)
-            after_timestamp = int(yesterday_23h_paris.timestamp() * 1000)
-
-            results = self.client.current_user_recently_played(limit=limit, after=after_timestamp)
+            results = self.client.current_user_recently_played(limit=limit)
             items = results.get("items", [])
-            logger.info(f"Fetched {len(items)} tracks played since 23:00 yesterday")
+            logger.info(f"Fetched {len(items)} recently played tracks")
             return items
         except Exception as e:
             raise SpotifyConnectorError(f"Error fetching recently played: {e}") from e
