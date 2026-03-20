@@ -24,6 +24,26 @@ spotify:
   top_artists:
     dataset: dp_lake_spotify_{env}
     table: normalized_top_artists
+  artist_detail:
+    dataset: dp_lake_spotify_{env}
+    table: normalized_artist_detail
+    ids_source_table: dp_hub_{env}.stg_hub__all_artist_ids
+    ids_source_column: artist_id
+  album_detail:
+    dataset: dp_lake_spotify_{env}
+    table: normalized_album_detail
+    ids_source_table: dp_hub_{env}.stg_hub__all_album_ids
+    ids_source_column: album_id
+  album_tracks:
+    dataset: dp_lake_spotify_{env}
+    table: normalized_album_tracks
+    ids_source_table: dp_hub_{env}.stg_hub__all_album_ids
+    ids_source_column: album_id
+  artist_albums:
+    dataset: dp_lake_spotify_{env}
+    table: normalized_artist_albums
+    ids_source_table: dp_hub_{env}.stg_hub__all_artist_ids
+    ids_source_column: artist_id
 
 garmin:
   filename_pattern: "{ts}_{source}_{data_type}.jsonl"

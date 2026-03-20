@@ -17,12 +17,9 @@ Supported data types:
 import logging
 import os
 from dataclasses import dataclass
-from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
-from zoneinfo import ZoneInfo
-
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 
@@ -43,6 +40,10 @@ class DataType(Enum):
     USER_PROFILE = "user_profile"
     TOP_TRACKS = "top_tracks"
     TOP_ARTISTS = "top_artists"
+    ARTIST_DETAIL = "artist_detail"
+    ALBUM_DETAIL = "album_detail"
+    ALBUM_TRACKS = "album_tracks"
+    ARTIST_ALBUMS = "artist_albums"
 
 
 @dataclass
@@ -73,6 +74,7 @@ class SpotifyConnector:
         DataType.USER_PROFILE: "user-read-private user-read-email",
         DataType.TOP_TRACKS: "user-top-read",
         DataType.TOP_ARTISTS: "user-top-read",
+        # ARTIST_DETAIL and ALBUM_DETAIL use public endpoints, no OAuth scope required
     }
 
     def __init__(self, config: SpotifyConfig):
@@ -160,17 +162,11 @@ class SpotifyConnector:
         return self._client
 
     def fetch_recently_played(self, limit: int = DEFAULT_LIMIT) -> List[Dict[str, Any]]:
-        """Fetch recently played tracks since 23:00 yesterday (1-hour safety buffer)."""
+        """Fetch the last played tracks (up to limit). Deduplication is handled in BQ."""
         try:
-            paris_tz = ZoneInfo("Europe/Paris")
-            now_paris = datetime.now(paris_tz)
-            today_midnight_paris = now_paris.replace(hour=0, minute=0, second=0, microsecond=0)
-            yesterday_23h_paris = today_midnight_paris - timedelta(hours=1)
-            after_timestamp = int(yesterday_23h_paris.timestamp() * 1000)
-
-            results = self.client.current_user_recently_played(limit=limit, after=after_timestamp)
+            results = self.client.current_user_recently_played(limit=limit)
             items = results.get("items", [])
-            logger.info(f"Fetched {len(items)} tracks played since 23:00 yesterday")
+            logger.info(f"Fetched {len(items)} recently played tracks")
             return items
         except Exception as e:
             raise SpotifyConnectorError(f"Error fetching recently played: {e}") from e
@@ -291,6 +287,96 @@ class SpotifyConnector:
         except Exception as e:
             raise SpotifyConnectorError(f"Error fetching top artists: {e}") from e
 
+    def fetch_artist_details(self, ids: List[str], **kwargs) -> List[Dict[str, Any]]:
+        """Fetch artist details for a list of Spotify artist IDs (batched, 50 per call)."""
+        if not ids:
+            return []
+        try:
+            results = []
+            batch_size = 50
+            for i in range(0, len(ids), batch_size):
+                batch = ids[i : i + batch_size]
+                response = self.client.artists(batch)
+                results.extend(response.get("artists", []))
+            logger.info(f"Fetched details for {len(results)} artists")
+            return results
+        except Exception as e:
+            raise SpotifyConnectorError(f"Error fetching artist details: {e}") from e
+
+    def fetch_album_details(self, ids: List[str], **kwargs) -> List[Dict[str, Any]]:
+        """Fetch album details for a list of Spotify album IDs (batched, 20 per call)."""
+        if not ids:
+            return []
+        try:
+            results = []
+            batch_size = 20  # Spotify /albums endpoint limit
+            for i in range(0, len(ids), batch_size):
+                batch = ids[i : i + batch_size]
+                response = self.client.albums(batch)
+                results.extend(a for a in response.get("albums", []) if a is not None)
+            logger.info(f"Fetched details for {len(results)} albums")
+            return results
+        except Exception as e:
+            raise SpotifyConnectorError(f"Error fetching album details: {e}") from e
+
+    def fetch_album_tracks(self, ids: List[str], **kwargs) -> List[Dict[str, Any]]:
+        """Fetch all tracks for each album ID (paginated). Injects album_id into each record."""
+        import time
+
+        results = []
+        failed = []
+        batch_size = 50
+        for album_id in ids:
+            try:
+                offset = 0
+                while True:
+                    response = self.client.album_tracks(album_id, limit=batch_size, offset=offset)
+                    items = response.get("items", [])
+                    for track in items:
+                        track["album_id"] = album_id
+                    results.extend(items)
+                    offset += len(items)
+                    if len(items) < batch_size:
+                        break
+                time.sleep(0.1)
+            except Exception as e:
+                logger.warning(f"Skipping album {album_id}: {e}")
+                failed.append(album_id)
+
+        if failed:
+            logger.warning(f"Failed to fetch tracks for {len(failed)}/{len(ids)} albums: {failed}")
+        logger.info(f"Fetched {len(results)} tracks across {len(ids) - len(failed)} albums")
+        return results
+
+    def fetch_artist_albums(self, ids: List[str], **kwargs) -> List[Dict[str, Any]]:
+        """Fetch all albums for each artist ID (paginated). Injects artist_id into each record."""
+        import time
+
+        results = []
+        failed = []
+        batch_size = 50
+        for artist_id in ids:
+            try:
+                offset = 0
+                while True:
+                    response = self.client.artist_albums(artist_id, album_type="album", limit=batch_size, offset=offset)
+                    items = response.get("items", [])
+                    for album in items:
+                        album["artist_id"] = artist_id
+                    results.extend(items)
+                    offset += len(items)
+                    if len(items) < batch_size:
+                        break
+                time.sleep(0.1)
+            except Exception as e:
+                logger.warning(f"Skipping artist {artist_id}: {e}")
+                failed.append(artist_id)
+
+        if failed:
+            logger.warning(f"Failed to fetch albums for {len(failed)}/{len(ids)} artists: {failed}")
+        logger.info(f"Fetched {len(results)} albums across {len(ids) - len(failed)} artists")
+        return results
+
     def fetch_data(
         self, data_type: DataType, **kwargs
     ) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
@@ -304,6 +390,10 @@ class SpotifyConnector:
             DataType.USER_PROFILE: self.fetch_user_profile,
             DataType.TOP_TRACKS: self.fetch_top_tracks,
             DataType.TOP_ARTISTS: self.fetch_top_artists,
+            DataType.ARTIST_DETAIL: self.fetch_artist_details,
+            DataType.ALBUM_DETAIL: self.fetch_album_details,
+            DataType.ALBUM_TRACKS: self.fetch_album_tracks,
+            DataType.ARTIST_ALBUMS: self.fetch_artist_albums,
         }
 
         if data_type not in method_map:
