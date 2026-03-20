@@ -6,10 +6,21 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
+def _flatten_nested(record: dict) -> dict:
+    """Serialize nested dicts/lists as JSON strings for BQ schema stability."""
+    flat = {}
+    for key, value in record.items():
+        if isinstance(value, (dict, list)):
+            flat[key] = json.dumps(value, default=str)
+        else:
+            flat[key] = value
+    return flat
+
+
 def _to_jsonl(data: list) -> str:
     ingested_at = datetime.now(timezone.utc).isoformat()
     return "\n".join(
-        json.dumps({**item, "_ingested_at": ingested_at}, default=str)
+        json.dumps({**_flatten_nested(item), "_ingested_at": ingested_at}, default=str)
         for item in data
     ) + "\n"
 
