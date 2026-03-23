@@ -2,7 +2,7 @@ name: Refresh Garmin tokens
 
 on:
   schedule:
-    - cron: "0 0 * * *" # Every day at midnight UTC
+    - cron: "0 0,12 * * *" # Every 12 hours (midnight and noon UTC)
   workflow_dispatch:
 
 jobs:
@@ -21,7 +21,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install garminconnect==0.2.40 google-cloud-storage==3.9.0
+        run: pip install "garminconnect @ git+https://github.com/cyberjunky/python-garminconnect.git@react" google-cloud-storage==3.9.0
 
       - name: Authenticate to GCP (dev)
         uses: google-github-actions/auth@v2
@@ -51,7 +51,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install garminconnect==0.2.40 google-cloud-storage==3.9.0
+        run: pip install "garminconnect @ git+https://github.com/cyberjunky/python-garminconnect.git@react" google-cloud-storage==3.9.0
 
       - name: Authenticate to GCP (prd)
         uses: google-github-actions/auth@v2

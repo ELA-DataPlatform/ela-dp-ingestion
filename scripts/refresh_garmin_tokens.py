@@ -24,39 +24,29 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 BUCKET_PATTERN = "ela-source-{env}"
-TOKEN_PREFIX = "garmin/tokens/"
+TOKEN_BLOB = "garmin/tokens/garmin_tokens.json"
 
 
-def download_tokens(bucket_name: str, local_dir: str) -> bool:
-    """Download garth token files from GCS."""
+def download_token(bucket_name: str, local_path: str) -> bool:
+    """Download garmin_tokens.json from GCS."""
     client = storage.Client()
     bucket = client.bucket(bucket_name)
-    blobs = list(bucket.list_blobs(prefix=TOKEN_PREFIX))
-    if not blobs:
-        logger.warning("No tokens found in gs://%s/%s", bucket_name, TOKEN_PREFIX)
+    blob = bucket.blob(TOKEN_BLOB)
+    if not blob.exists():
+        logger.warning("No tokens found in gs://%s/%s", bucket_name, TOKEN_BLOB)
         return False
-    for blob in blobs:
-        filename = blob.name[len(TOKEN_PREFIX):]
-        if not filename:
-            continue
-        local_path = os.path.join(local_dir, filename)
-        blob.download_to_filename(local_path)
-    logger.info("Downloaded %d token files from gs://%s/%s", len(blobs), bucket_name, TOKEN_PREFIX)
+    blob.download_to_filename(local_path)
+    logger.info("Downloaded tokens from gs://%s/%s", bucket_name, TOKEN_BLOB)
     return True
 
 
-def upload_tokens(bucket_name: str, local_dir: str) -> None:
-    """Upload garth token files to GCS."""
+def upload_token(bucket_name: str, local_path: str) -> None:
+    """Upload garmin_tokens.json to GCS."""
     client = storage.Client()
     bucket = client.bucket(bucket_name)
-    count = 0
-    for f in os.listdir(local_dir):
-        filepath = os.path.join(local_dir, f)
-        if os.path.isfile(filepath):
-            blob = bucket.blob(TOKEN_PREFIX + f)
-            blob.upload_from_filename(filepath)
-            count += 1
-    logger.info("Uploaded %d token files to gs://%s/%s", count, bucket_name, TOKEN_PREFIX)
+    blob = bucket.blob(TOKEN_BLOB)
+    blob.upload_from_filename(local_path)
+    logger.info("Uploaded tokens to gs://%s/%s", bucket_name, TOKEN_BLOB)
 
 
 def refresh(env: str) -> None:
@@ -70,25 +60,26 @@ def refresh(env: str) -> None:
     bucket_name = BUCKET_PATTERN.format(env=env)
 
     with tempfile.TemporaryDirectory() as token_dir:
+        token_path = os.path.join(token_dir, "garmin_tokens.json")
         garmin = Garmin(username, password)
 
         # Try cached tokens first
-        if download_tokens(bucket_name, token_dir):
+        if download_token(bucket_name, token_path):
             try:
-                garmin.login(tokenstore=token_dir)
+                garmin.login(tokenstore=token_path)
                 logger.info("Authenticated via cached tokens")
-                garmin.garth.dump(token_dir)
-                upload_tokens(bucket_name, token_dir)
+                garmin.client.dump(token_path)
+                upload_token(bucket_name, token_path)
                 return
             except Exception as e:
                 logger.warning("Cached tokens invalid, falling back to login: %s", e)
 
-        # Full SSO login
+        # Full login with credentials
         try:
             garmin.login()
             logger.info("Authenticated via username/password")
-            garmin.garth.dump(token_dir)
-            upload_tokens(bucket_name, token_dir)
+            garmin.client.dump(token_path)
+            upload_token(bucket_name, token_path)
         except Exception as e:
             logger.error("Authentication failed: %s", e)
             sys.exit(1)
