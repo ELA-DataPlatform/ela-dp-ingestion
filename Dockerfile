@@ -1,8 +1,11 @@
 FROM python:3.12-slim AS builder
 
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN pip install --no-cache-dir --no-compile --target=/deps \
     spotipy==2.26.0 \
-    garminconnect==0.2.40 \
+    "garminconnect @ git+https://github.com/cyberjunky/python-garminconnect.git@react" \
     google-cloud-storage==3.9.0 \
     google-cloud-bigquery==3.40.1 \
     pyyaml==6.0.3
