@@ -168,6 +168,14 @@ class GarminConnector:
         except Exception as e:
             logger.warning(f"Failed to upload tokens to GCS: {e}")
 
+    # Headers required by Garmin/Cloudflare — the library only sets them
+    # during password login (_establish_session), not when loading from tokenstore.
+    _BROWSER_HEADERS = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+
     def authenticate(self, data_types: List[DataType]) -> None:
         """Authenticate to Garmin Connect with token caching on GCS.
 
@@ -181,6 +189,10 @@ class GarminConnector:
             # Try cached tokens first
             if self._download_token_from_gcs(token_dir):
                 try:
+                    # Set browser headers BEFORE login — the library skips this
+                    # when loading from tokenstore, causing Cloudflare/Garmin to
+                    # reject requests made with the default python-requests UA.
+                    self._client.client.cs.headers.update(self._BROWSER_HEADERS)
                     self._client.login(tokenstore=token_dir)
                     logger.info("Authenticated via cached tokens")
                     self._client.client.dump(token_dir)
