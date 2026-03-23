@@ -1,5 +1,5 @@
 """
-Refresh Garmin OAuth tokens and upload them to GCS.
+Refresh Garmin tokens and upload them to GCS.
 
 Usage:
     python scripts/refresh_garmin_tokens.py --env dev
@@ -14,7 +14,6 @@ import os
 import sys
 import tempfile
 
-from google.cloud import storage
 from garminconnect import Garmin
 
 logging.basicConfig(
@@ -25,35 +24,33 @@ logger = logging.getLogger(__name__)
 
 BUCKET_PATTERN = "ela-source-{env}"
 TOKEN_GCS_PREFIX = "garmin/tokens"
-TOKEN_FILES = ["oauth1_token.json", "oauth2_token.json"]
+TOKEN_FILE = "garmin_tokens.json"
 
 
 def download_tokens(bucket_name: str, local_dir: str) -> bool:
-    """Download garth token files from GCS into a local directory."""
+    """Download garmin_tokens.json from GCS into a local directory."""
+    from google.cloud import storage
     client = storage.Client()
     bucket = client.bucket(bucket_name)
-    found = False
-    for filename in TOKEN_FILES:
-        blob = bucket.blob(f"{TOKEN_GCS_PREFIX}/{filename}")
-        if blob.exists():
-            blob.download_to_filename(os.path.join(local_dir, filename))
-            logger.info("Downloaded gs://%s/%s/%s", bucket_name, TOKEN_GCS_PREFIX, filename)
-            found = True
-        else:
-            logger.warning("Not found: gs://%s/%s/%s", bucket_name, TOKEN_GCS_PREFIX, filename)
-    return found
+    blob = bucket.blob(f"{TOKEN_GCS_PREFIX}/{TOKEN_FILE}")
+    if blob.exists():
+        blob.download_to_filename(os.path.join(local_dir, TOKEN_FILE))
+        logger.info("Downloaded gs://%s/%s/%s", bucket_name, TOKEN_GCS_PREFIX, TOKEN_FILE)
+        return True
+    logger.warning("Not found: gs://%s/%s/%s", bucket_name, TOKEN_GCS_PREFIX, TOKEN_FILE)
+    return False
 
 
 def upload_tokens(bucket_name: str, local_dir: str) -> None:
-    """Upload garth token files from a local directory to GCS."""
+    """Upload garmin_tokens.json from a local directory to GCS."""
+    from google.cloud import storage
     client = storage.Client()
     bucket = client.bucket(bucket_name)
-    for filename in TOKEN_FILES:
-        local_path = os.path.join(local_dir, filename)
-        if os.path.exists(local_path):
-            blob = bucket.blob(f"{TOKEN_GCS_PREFIX}/{filename}")
-            blob.upload_from_filename(local_path)
-            logger.info("Uploaded gs://%s/%s/%s", bucket_name, TOKEN_GCS_PREFIX, filename)
+    local_path = os.path.join(local_dir, TOKEN_FILE)
+    if os.path.exists(local_path):
+        blob = bucket.blob(f"{TOKEN_GCS_PREFIX}/{TOKEN_FILE}")
+        blob.upload_from_filename(local_path)
+        logger.info("Uploaded gs://%s/%s/%s", bucket_name, TOKEN_GCS_PREFIX, TOKEN_FILE)
 
 
 def refresh(env: str) -> None:
@@ -74,7 +71,7 @@ def refresh(env: str) -> None:
             try:
                 garmin.login(tokenstore=token_dir)
                 logger.info("Authenticated via cached tokens")
-                garmin.garth.dump(token_dir)
+                garmin.client.dump(token_dir)
                 upload_tokens(bucket_name, token_dir)
                 return
             except Exception as e:
@@ -84,7 +81,7 @@ def refresh(env: str) -> None:
         try:
             garmin.login()
             logger.info("Authenticated via username/password")
-            garmin.garth.dump(token_dir)
+            garmin.client.dump(token_dir)
             upload_tokens(bucket_name, token_dir)
         except Exception as e:
             logger.error("Authentication failed: %s", e)
