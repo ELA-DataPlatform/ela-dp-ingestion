@@ -27,7 +27,7 @@ def main():
     print(f"Logging in as {username}...")
     garmin = Garmin(username, password)
     garmin.login()
-    garmin.client.dump(OUTPUT_FILE)
+    garmin.garth.dump(OUTPUT_FILE)
     print(f"Tokens saved to {OUTPUT_FILE}")
     print()
     print("Upload to GCS with:")
