@@ -2,10 +2,11 @@
 Bootstrap Garmin tokens locally.
 
 Run once from a residential/office IP to avoid 429 rate limits,
-then upload the generated file to GCS:
+then upload the generated token files to GCS:
 
     python scripts/bootstrap_garmin_tokens.py
-    gcloud storage cp garmin_tokens.json gs://ela-source-dev/garmin/tokens/garmin_tokens.json
+    gcloud storage cp garmin_tokens/oauth1_token.json gs://ela-source-dev/garmin/tokens/oauth1_token.json
+    gcloud storage cp garmin_tokens/oauth2_token.json gs://ela-source-dev/garmin/tokens/oauth2_token.json
 """
 
 import os
@@ -13,7 +14,7 @@ import sys
 
 from garminconnect import Garmin
 
-OUTPUT_FILE = "garmin_tokens.json"
+OUTPUT_DIR = "garmin_tokens"
 
 
 def main():
@@ -27,11 +28,12 @@ def main():
     print(f"Logging in as {username}...")
     garmin = Garmin(username, password)
     garmin.login()
-    garmin.garth.dump(OUTPUT_FILE)
-    print(f"Tokens saved to {OUTPUT_FILE}")
+    garmin.garth.dump(OUTPUT_DIR)
+    print(f"Tokens saved to {OUTPUT_DIR}/")
     print()
     print("Upload to GCS with:")
-    print(f"  gcloud storage cp {OUTPUT_FILE} gs://ela-source-dev/garmin/tokens/garmin_tokens.json")
+    print(f"  gcloud storage cp {OUTPUT_DIR}/oauth1_token.json gs://ela-source-dev/garmin/tokens/oauth1_token.json")
+    print(f"  gcloud storage cp {OUTPUT_DIR}/oauth2_token.json gs://ela-source-dev/garmin/tokens/oauth2_token.json")
 
 
 if __name__ == "__main__":
