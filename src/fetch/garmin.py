@@ -125,42 +125,48 @@ class GarminConnector:
             tokenstore_gcs=os.getenv("GARMIN_TOKENSTORE_GCS", ""),
         )
 
-    def _download_token_from_gcs(self, local_path: str) -> bool:
-        """Download garmin_tokens.json from GCS."""
+    _TOKEN_FILES = ["oauth1_token.json", "oauth2_token.json"]
+
+    def _download_token_from_gcs(self, local_dir: str) -> bool:
+        """Download garth token files from GCS into a local directory."""
         if not self.tokenstore_gcs:
             return False
         try:
             from google.cloud import storage
             gcs_path = self.tokenstore_gcs[len("gs://"):]
             bucket_name, prefix = gcs_path.split("/", 1)
-            blob_name = prefix.rstrip("/") + "/garmin_tokens.json"
+            gcs_prefix = prefix.rstrip("/")
             client = storage.Client()
             bucket = client.bucket(bucket_name)
-            blob = bucket.blob(blob_name)
-            if not blob.exists():
-                logger.info("No cached tokens found on GCS")
-                return False
-            blob.download_to_filename(local_path)
-            logger.info(f"Downloaded tokens from gs://{bucket_name}/{blob_name}")
-            return True
+            found = False
+            for filename in self._TOKEN_FILES:
+                blob = bucket.blob(f"{gcs_prefix}/{filename}")
+                if blob.exists():
+                    blob.download_to_filename(os.path.join(local_dir, filename))
+                    logger.info(f"Downloaded gs://{bucket_name}/{gcs_prefix}/{filename}")
+                    found = True
+            return found
         except Exception as e:
             logger.warning(f"Failed to download tokens from GCS: {e}")
             return False
 
-    def _upload_token_to_gcs(self, local_path: str) -> None:
-        """Upload garmin_tokens.json to GCS."""
+    def _upload_token_to_gcs(self, local_dir: str) -> None:
+        """Upload garth token files from a local directory to GCS."""
         if not self.tokenstore_gcs:
             return
         try:
             from google.cloud import storage
             gcs_path = self.tokenstore_gcs[len("gs://"):]
             bucket_name, prefix = gcs_path.split("/", 1)
-            blob_name = prefix.rstrip("/") + "/garmin_tokens.json"
+            gcs_prefix = prefix.rstrip("/")
             client = storage.Client()
             bucket = client.bucket(bucket_name)
-            blob = bucket.blob(blob_name)
-            blob.upload_from_filename(local_path)
-            logger.info(f"Uploaded tokens to gs://{bucket_name}/{blob_name}")
+            for filename in self._TOKEN_FILES:
+                local_path = os.path.join(local_dir, filename)
+                if os.path.exists(local_path):
+                    blob = bucket.blob(f"{gcs_prefix}/{filename}")
+                    blob.upload_from_filename(local_path)
+                    logger.info(f"Uploaded gs://{bucket_name}/{gcs_prefix}/{filename}")
         except Exception as e:
             logger.warning(f"Failed to upload tokens to GCS: {e}")
 
@@ -172,16 +178,15 @@ class GarminConnector:
         3. Save tokens to GCS after successful login
         """
         with tempfile.TemporaryDirectory() as token_dir:
-            token_path = os.path.join(token_dir, "garmin_tokens.json")
             self._client = Garmin(self.username, self.password)
 
             # Try cached tokens first
-            if self._download_token_from_gcs(token_path):
+            if self._download_token_from_gcs(token_dir):
                 try:
-                    self._client.login(tokenstore=token_path)
+                    self._client.login(tokenstore=token_dir)
                     logger.info("Authenticated via cached tokens")
-                    self._client.client.dump(token_path)
-                    self._upload_token_to_gcs(token_path)
+                    self._client.garth.dump(token_dir)
+                    self._upload_token_to_gcs(token_dir)
                     return
                 except Exception as e:
                     logger.warning(f"Cached tokens invalid, falling back to login: {e}")
@@ -190,8 +195,8 @@ class GarminConnector:
             try:
                 self._client.login()
                 logger.info("Authenticated via username/password")
-                self._client.client.dump(token_path)
-                self._upload_token_to_gcs(token_path)
+                self._client.garth.dump(token_dir)
+                self._upload_token_to_gcs(token_dir)
             except Exception as e:
                 raise GarminConnectorError(f"Authentication failed: {e}") from e
 
