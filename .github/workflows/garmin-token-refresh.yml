@@ -2,7 +2,7 @@ name: Refresh Garmin tokens
 
 on:
   schedule:
-    - cron: "0 0,12 * * *" # Every 12 hours (midnight and noon UTC)
+    - cron: "0 0,6,12,18 * * *" # Every 6 hours
   workflow_dispatch:
 
 jobs:
@@ -36,7 +36,6 @@ jobs:
         run: python scripts/refresh_garmin_tokens.py --env dev
 
   refresh-prd:
-    needs: refresh-dev
     runs-on: ubuntu-latest
     permissions:
       contents: read
