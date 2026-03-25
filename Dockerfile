@@ -21,6 +21,7 @@ COPY --from=builder /deps /usr/local/lib/python3.12/site-packages/
 
 COPY src/ ./src/
 COPY config/ ./config/
+COPY scripts/ ./scripts/
 COPY run.py ./
 
 VOLUME /app/output
