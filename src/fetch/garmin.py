@@ -75,6 +75,25 @@ class GarminConnectorError(Exception):
     pass
 
 
+def _deduplicate_keys_case_insensitive(d: dict) -> dict:
+    """Drop keys that collide case-insensitively, keeping the first occurrence.
+
+    BigQuery field names are case-insensitive. If the Garmin API returns two
+    keys that differ only by case (e.g. 'spO2Foo' and 'spo2Foo'), BQ rejects
+    the load with a 'Duplicate field names' error.
+    """
+    seen: set = set()
+    result: dict = {}
+    for key, value in d.items():
+        lower = key.lower()
+        if lower not in seen:
+            seen.add(lower)
+            result[key] = value
+        else:
+            logger.warning(f"Dropping case-insensitive duplicate key: '{key}'")
+    return result
+
+
 class GarminConnector:
     """
     Garmin Connect data connector.
@@ -275,6 +294,7 @@ class GarminConnector:
         for item in items:
             if not isinstance(item, dict):
                 item = {"value": item}
+            item = _deduplicate_keys_case_insensitive(item)
             item["data_type"] = metric
             if date_str:
                 item.setdefault("date", date_str)
@@ -442,6 +462,15 @@ class GarminConnector:
                 lambda d: f"usersummary-service/usersummary/daily/{dn}?calendarDate={d}",
                 metric, start, end,
             )
+            # abnormalHeartRateAlertsCount sometimes comes back as STRING from
+            # the API but the BQ table expects INTEGER.
+            for record in result:
+                v = record.get("abnormalHeartRateAlertsCount")
+                if isinstance(v, str):
+                    try:
+                        record["abnormalHeartRateAlertsCount"] = int(v)
+                    except ValueError:
+                        pass
 
         elif data_type == DataType.STATS_AND_BODY:
             result = self._daily_rest(
