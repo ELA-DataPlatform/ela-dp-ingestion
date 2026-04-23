@@ -295,6 +295,9 @@ class GarminConnector:
             if not isinstance(item, dict):
                 item = {"value": item}
             item = _deduplicate_keys_case_insensitive(item)
+            # Drop None values — BQ autodetect infers STRING for null-only columns,
+            # which breaks WRITE_APPEND against tables with numeric column types.
+            item = {k: v for k, v in item.items() if v is not None}
             item["data_type"] = metric
             if date_str:
                 item.setdefault("date", date_str)
