@@ -13,8 +13,6 @@ Supported data types (29):
    endurance_score, hill_score
 """
 
-import io
-import json
 import logging
 import os
 import tempfile
