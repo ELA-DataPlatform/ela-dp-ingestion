@@ -2,7 +2,7 @@ FROM python:3.12-slim AS builder
 
 RUN pip install --no-cache-dir --no-compile --target=/deps \
     spotipy==2.26.0 \
-    requests==2.32.3 \
+    garminconnect==0.3.3 \
     google-cloud-storage==3.9.0 \
     google-cloud-bigquery==3.40.1 \
     pyyaml==6.0.3

@@ -1,12 +1,11 @@
 """
 Garmin Data Fetcher
 -------------------
-Fetches Garmin Connect data using a browser session (cookies) maintained by
-scripts/garmin_session_refresh.py running on Mac mini and stored in GCS.
+Fetches Garmin Connect data using OAuth DI tokens (mobile SSO flow).
 
-Authentication is decoupled: the Mac mini handles Camoufox/Cloudflare login
-and uploads garmin_session.json to GCS. Cloud Run simply loads those cookies
-and calls the Garmin Connect REST/GraphQL APIs directly with requests.
+Authentication: tokens stored in GCS (GARMIN_TOKENSTORE_GCS).
+Bootstrap: run scripts/garmin_bootstrap_tokens.py once to create initial tokens.
+Cloud Run: loads tokens from GCS, auto-refreshes, re-uploads after each job.
 
 Supported data types (29):
  - activities, activity_details, activity_splits, activity_weather,
@@ -18,34 +17,24 @@ Supported data types (29):
    endurance_score, hill_score
 """
 
-import json
 import logging
 import os
 import time
 from datetime import date, timedelta
 from enum import Enum
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import requests
+from garminconnect import (
+    Garmin,
+    GarminConnectAuthenticationError,
+    GarminConnectConnectionError,
+)
 
 logger = logging.getLogger(__name__)
 
-GARMIN_BASE = "https://connect.garmin.com"
-GARMIN_GQL = f"{GARMIN_BASE}/gc-api/graphql-gateway/graphql"
-
+GQL_PATH = "graphql-gateway/graphql"
 DEFAULT_DAYS = 3
-
-_BROWSER_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:132.0) "
-        "Gecko/20100101 Firefox/132.0"
-    ),
-    "Origin": "https://connect.garmin.com",
-    "Referer": "https://connect.garmin.com/modern/",
-    "Accept": "application/json",
-    "Accept-Language": "en-US,en;q=0.9",
-    "DNT": "1",
-}
 
 
 class DataType(Enum):
@@ -90,19 +79,23 @@ class GarminConnector:
     """
     Garmin Connect data connector.
 
-    Loads a browser session (cookies + CSRF token) from GCS — maintained by
-    scripts/garmin_session_refresh.py on Mac mini — and uses it to call
-    Garmin Connect REST and GraphQL endpoints directly with requests.
+    Loads OAuth DI tokens from GCS, authenticates via garminconnect library
+    (mobile SSO — no browser required), and calls Garmin Connect REST and
+    GraphQL endpoints. Re-uploads tokens to GCS after each fetch to persist
+    any auto-refresh.
+
+    Bootstrap: run scripts/garmin_bootstrap_tokens.py once from a machine
+    with credentials to create the initial token file in GCS.
     """
 
-    SESSION_FILE = "garmin_session.json"
+    TOKEN_FILE = "garmin_tokens.json"
+    TMP_TOKEN_DIR = "/tmp/garmin_tokens"
 
     def __init__(self, username: str, password: str, tokenstore_gcs: str = ""):
         self.username = username
         self.password = password
         self.tokenstore_gcs = tokenstore_gcs
-        self._session: Optional[requests.Session] = None
-        self._csrf: Optional[str] = None
+        self._garmin: Optional[Garmin] = None
         self._display_name: Optional[str] = None
 
     @classmethod
@@ -118,9 +111,17 @@ class GarminConnector:
             tokenstore_gcs=os.getenv("GARMIN_TOKENSTORE_GCS", ""),
         )
 
-    def _download_session_from_gcs(self) -> Optional[dict]:
+    # -------------------------------------------------------------------------
+    # Token storage helpers
+    # -------------------------------------------------------------------------
+
+    def _download_tokens_from_gcs(self) -> str:
+        """Download garmin_tokens.json from GCS and return its content."""
         if not self.tokenstore_gcs:
-            return None
+            raise GarminConnectorError(
+                "GARMIN_TOKENSTORE_GCS not set. "
+                "Run scripts/garmin_bootstrap_tokens.py first."
+            )
         try:
             from google.cloud import storage
 
@@ -128,109 +129,135 @@ class GarminConnector:
             bucket_name, prefix = gcs_path.split("/", 1)
             client = storage.Client()
             bucket = client.bucket(bucket_name)
-            blob = bucket.blob(f"{prefix.rstrip('/')}/{self.SESSION_FILE}")
+            blob = bucket.blob(f"{prefix.rstrip('/')}/{self.TOKEN_FILE}")
             if not blob.exists():
-                logger.warning(f"Session file not found in GCS: {self.SESSION_FILE}")
-                return None
-            return json.loads(blob.download_as_text())
+                raise GarminConnectorError(
+                    f"Token file not found in GCS: {self.TOKEN_FILE}. "
+                    "Run scripts/garmin_bootstrap_tokens.py first."
+                )
+            return blob.download_as_text()
+        except GarminConnectorError:
+            raise
         except Exception as e:
-            logger.warning(f"Failed to download session from GCS: {e}")
-            return None
+            raise GarminConnectorError(
+                f"Failed to download tokens from GCS: {e}"
+            ) from e
+
+    def _upload_tokens_to_gcs(self, token_json: str) -> None:
+        """Upload token JSON string back to GCS."""
+        if not self.tokenstore_gcs:
+            return
+        try:
+            from google.cloud import storage
+
+            gcs_path = self.tokenstore_gcs[len("gs://"):]
+            bucket_name, prefix = gcs_path.split("/", 1)
+            client = storage.Client()
+            bucket = client.bucket(bucket_name)
+            blob = bucket.blob(f"{prefix.rstrip('/')}/{self.TOKEN_FILE}")
+            blob.upload_from_string(token_json, content_type="application/json")
+            logger.info("Tokens re-uploaded to GCS")
+        except Exception as e:
+            logger.warning(f"Failed to upload tokens to GCS: {e}")
+
+    # -------------------------------------------------------------------------
+    # Authentication
+    # -------------------------------------------------------------------------
 
     def authenticate(self, data_types=None) -> None:
         """
-        Load the Garmin session from GCS and build a requests.Session.
+        Load OAuth tokens from GCS and authenticate via garminconnect.
 
-        The session (cookies + CSRF token) is maintained by
-        scripts/garmin_session_refresh.py running on Mac mini.
+        Writes tokens to a temp directory, calls garmin.login() which loads
+        them and fetches the user profile (display_name). Cleans up the temp
+        file afterward.
         """
-        session_data = self._download_session_from_gcs()
-        if not session_data:
+        token_json = self._download_tokens_from_gcs()
+
+        tmp_dir = Path(self.TMP_TOKEN_DIR)
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        token_file = tmp_dir / self.TOKEN_FILE
+        token_file.write_text(token_json)
+
+        try:
+            garmin = Garmin()
+            garmin.login(str(tmp_dir))
+        except GarminConnectAuthenticationError as e:
             raise GarminConnectorError(
-                "No Garmin session found in GCS. "
-                "Run scripts/garmin_session_refresh.py on Mac mini first."
-            )
+                "Garmin authentication failed — tokens may be expired or revoked. "
+                f"Re-run scripts/garmin_bootstrap_tokens.py. ({e})"
+            ) from e
+        except GarminConnectConnectionError as e:
+            raise GarminConnectorError(
+                f"Garmin connection error during auth: {e}"
+            ) from e
+        finally:
+            token_file.unlink(missing_ok=True)
 
-        age_h = (time.time() - session_data.get("saved_at", 0)) / 3600
-        if age_h > 1:
-            logger.warning(f"Garmin session is {age_h:.1f}h old — may have expired")
+        self._garmin = garmin
+        self._display_name = garmin.display_name
+        logger.info(f"Authenticated as {self._display_name}")
 
-        self._csrf = session_data.get("csrf_token", "")
-        self._display_name = session_data.get("display_name", "")
-        cookies = session_data.get("cookies", [])
-
-        self._session = requests.Session()
-        self._session.headers.update({
-            **_BROWSER_HEADERS,
-            "connect-csrf-token": self._csrf,
-        })
-        for c in cookies:
-            self._session.cookies.set(
-                c["name"],
-                c["value"],
-                domain=c.get("domain", ""),
-                path=c.get("path", "/"),
-            )
-
-        logger.info(
-            f"Session loaded: {len(cookies)} cookies, "
-            f"display_name={self._display_name}, "
-            f"age={age_h:.1f}h"
-        )
+    def save_tokens(self) -> None:
+        """Re-upload tokens to GCS (persists any auto-refresh that occurred)."""
+        if self._garmin is None:
+            return
+        self._upload_tokens_to_gcs(self._garmin.client.dumps())
 
     # -------------------------------------------------------------------------
     # HTTP helpers
     # -------------------------------------------------------------------------
 
     def _get(self, path: str, retries: int = 3) -> Optional[Any]:
-        url = f"{GARMIN_BASE}{path}" if path.startswith("/") else path
+        """GET request via garminconnect (connectapi.garmin.com)."""
         for attempt in range(retries):
             try:
-                resp = self._session.get(url, timeout=30)
-                if resp.status_code == 200:
-                    return resp.json()
-                if resp.status_code == 429:
+                return self._garmin.client.connectapi(path)
+            except GarminConnectAuthenticationError as e:
+                raise GarminConnectorError(
+                    f"Auth error — re-run bootstrap script. ({e})"
+                ) from e
+            except GarminConnectConnectionError as e:
+                if "429" in str(e):
                     wait = 2 ** (attempt + 1)
                     logger.warning(f"429 on {path}, retrying in {wait}s")
                     time.sleep(wait)
                     continue
-                logger.warning(f"GET {path} → {resp.status_code}")
+                logger.warning(f"GET {path} error: {e}")
                 return None
             except Exception as e:
-                logger.warning(f"GET {path} error: {e}")
-                if attempt < retries - 1:
-                    time.sleep(2)
+                logger.warning(f"GET {path} unexpected error: {e}")
+                return None
         return None
 
     def _gql(self, query: str, retries: int = 3) -> Optional[Any]:
+        """GraphQL POST via garminconnect (connectapi.garmin.com)."""
         for attempt in range(retries):
             try:
-                resp = self._session.post(
-                    GARMIN_GQL,
-                    json={"query": query},
-                    headers={"Content-Type": "application/json"},
-                    timeout=30,
+                data = self._garmin.client.post(
+                    "", GQL_PATH, json={"query": query}, api=True
                 )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    # Unwrap {"data": {"queryName": result}}
-                    if isinstance(data, dict) and "data" in data:
-                        inner = data["data"]
-                        if isinstance(inner, dict) and len(inner) == 1:
-                            return list(inner.values())[0]
-                        return inner
-                    return data
-                if resp.status_code == 429:
+                if isinstance(data, dict) and "data" in data:
+                    inner = data["data"]
+                    if isinstance(inner, dict) and len(inner) == 1:
+                        return list(inner.values())[0]
+                    return inner
+                return data
+            except GarminConnectAuthenticationError as e:
+                raise GarminConnectorError(
+                    f"Auth error — re-run bootstrap script. ({e})"
+                ) from e
+            except GarminConnectConnectionError as e:
+                if "429" in str(e):
                     wait = 2 ** (attempt + 1)
                     logger.warning(f"429 on GQL, retrying in {wait}s")
                     time.sleep(wait)
                     continue
-                logger.warning(f"GQL → {resp.status_code}")
+                logger.warning(f"GQL error: {e}")
                 return None
             except Exception as e:
-                logger.warning(f"GQL error: {e}")
-                if attempt < retries - 1:
-                    time.sleep(2)
+                logger.warning(f"GQL unexpected error: {e}")
+                return None
         return None
 
     # -------------------------------------------------------------------------
@@ -310,7 +337,7 @@ class GarminConnector:
         offset = 0
         while True:
             path = (
-                f"/gc-api/activitylist-service/activities/search/activities"
+                f"activitylist-service/activities/search/activities"
                 f"?limit=100&start={offset}"
                 f"&startDate={start_str}&endDate={end_str}"
             )
@@ -337,11 +364,11 @@ class GarminConnector:
         )
 
         url_fns = {
-            "activity_details": lambda aid: f"/gc-api/activity-service/activity/{aid}",
-            "activity_splits": lambda aid: f"/gc-api/activity-service/activity/{aid}/splits",
-            "activity_weather": lambda aid: f"/gc-api/activity-service/activity/{aid}/weather",
-            "activity_hr_zones": lambda aid: f"/gc-api/activity-service/activity/{aid}/hrTimeInZones",
-            "activity_exercise_sets": lambda aid: f"/gc-api/activity-service/activity/{aid}/exerciseSets",
+            "activity_details": lambda aid: f"activity-service/activity/{aid}",
+            "activity_splits": lambda aid: f"activity-service/activity/{aid}/splits",
+            "activity_weather": lambda aid: f"activity-service/activity/{aid}/weather",
+            "activity_hr_zones": lambda aid: f"activity-service/activity/{aid}/hrTimeInZones",
+            "activity_exercise_sets": lambda aid: f"activity-service/activity/{aid}/exerciseSets",
         }
         url_fn = url_fns[endpoint_key]
 
@@ -372,7 +399,7 @@ class GarminConnector:
     # -------------------------------------------------------------------------
 
     def fetch_data(self, data_type: DataType, **kwargs) -> List[Dict[str, Any]]:
-        """Dispatch fetch by DataType."""
+        """Dispatch fetch by DataType. Saves tokens to GCS after completion."""
         days = kwargs.get("days", DEFAULT_DAYS)
         end = date.today()
         start = end - timedelta(days=days)
@@ -384,164 +411,166 @@ class GarminConnector:
         logger.info(f"Fetching {metric} ({days} days, {s} → {e})...")
 
         if data_type == DataType.ACTIVITIES:
-            return self._fetch_activities(s, e, metric)
+            result = self._fetch_activities(s, e, metric)
 
         elif data_type == DataType.SLEEP:
-            return self._daily_rest(
-                lambda d: f"/gc-api/wellness-service/wellness/dailySleepData/{dn}?date={d}",
+            result = self._daily_rest(
+                lambda d: f"wellness-service/wellness/dailySleepData/{dn}?date={d}",
                 metric, start, end,
             )
 
         elif data_type == DataType.STEPS:
-            return self._daily_rest(
-                lambda d: f"/gc-api/usersummary-service/stats/steps/daily/{d}/{d}",
+            result = self._daily_rest(
+                lambda d: f"usersummary-service/stats/steps/daily/{d}/{d}",
                 metric, start, end,
             )
 
         elif data_type == DataType.HEART_RATE:
-            return self._daily_rest(
-                lambda d: f"/gc-api/wellness-service/wellness/dailyHeartRate/{dn}?date={d}",
+            result = self._daily_rest(
+                lambda d: f"wellness-service/wellness/dailyHeartRate/{dn}?date={d}",
                 metric, start, end,
             )
 
         elif data_type == DataType.STRESS:
-            return self._daily_rest(
-                lambda d: f"/gc-api/wellness-service/wellness/dailyStress/{d}",
+            result = self._daily_rest(
+                lambda d: f"wellness-service/wellness/dailyStress/{d}",
                 metric, start, end,
             )
 
         elif data_type == DataType.USER_SUMMARY:
-            return self._daily_rest(
-                lambda d: f"/gc-api/usersummary-service/usersummary/daily/{dn}?calendarDate={d}",
+            result = self._daily_rest(
+                lambda d: f"usersummary-service/usersummary/daily/{dn}?calendarDate={d}",
                 metric, start, end,
             )
 
         elif data_type == DataType.STATS_AND_BODY:
-            return self._daily_rest(
-                lambda d: f"/gc-api/usersummary-service/stats/daily/{d}/{d}",
+            result = self._daily_rest(
+                lambda d: f"usersummary-service/stats/daily/{d}/{d}",
                 metric, start, end,
             )
 
         elif data_type == DataType.RHR_DAILY:
-            # Resting HR is embedded in the daily heart rate response
-            return self._daily_rest(
-                lambda d: f"/gc-api/wellness-service/wellness/dailyHeartRate/{dn}?date={d}",
+            result = self._daily_rest(
+                lambda d: f"wellness-service/wellness/dailyHeartRate/{dn}?date={d}",
                 metric, start, end,
             )
 
         elif data_type == DataType.SPO2:
-            return self._daily_rest(
-                lambda d: f"/gc-api/wellness-service/wellness/dailySpo2/{d}",
+            result = self._daily_rest(
+                lambda d: f"wellness-service/wellness/dailySpo2/{d}",
                 metric, start, end,
             )
 
         elif data_type == DataType.RESPIRATION:
-            return self._daily_rest(
-                lambda d: f"/gc-api/wellness-service/wellness/daily/respiration/{d}",
+            result = self._daily_rest(
+                lambda d: f"wellness-service/wellness/daily/respiration/{d}",
                 metric, start, end,
             )
 
         elif data_type == DataType.INTENSITY_MINUTES:
-            return self._daily_rest(
-                lambda d: f"/gc-api/wellness-service/wellness/daily/im/{d}",
+            result = self._daily_rest(
+                lambda d: f"wellness-service/wellness/daily/im/{d}",
                 metric, start, end,
             )
 
         elif data_type == DataType.MAX_METRICS:
-            return self._range_rest(
-                f"/gc-api/metrics-service/metrics/maxmet/daily/{s}/{e}",
+            result = self._range_rest(
+                f"metrics-service/metrics/maxmet/daily/{s}/{e}",
                 metric,
             )
 
         elif data_type == DataType.ALL_DAY_EVENTS:
-            return self._daily_gql(
+            result = self._daily_gql(
                 lambda d: f'query{{dailyEventsScalar(date:"{d}")}}',
                 metric, start, end,
             )
 
         elif data_type == DataType.TRAINING_STATUS:
-            return self._daily_gql(
+            result = self._daily_gql(
                 lambda d: f'query{{trainingStatusDailyScalar(calendarDate:"{d}")}}',
                 metric, start, end,
             )
 
         elif data_type == DataType.TRAINING_READINESS:
-            return self._range_gql(
+            result = self._range_gql(
                 f'query{{trainingReadinessRangeScalar(startDate:"{s}", endDate:"{e}")}}',
                 metric,
             )
 
         elif data_type == DataType.HRV:
-            return self._range_gql(
+            result = self._range_gql(
                 f'query{{heartRateVariabilityScalar(startDate:"{s}", endDate:"{e}")}}',
                 metric,
             )
 
         elif data_type == DataType.FLOORS:
-            return self._daily_rest(
-                lambda d: f"/gc-api/wellness-service/wellness/floorsChartData/daily/{d}",
+            result = self._daily_rest(
+                lambda d: f"wellness-service/wellness/floorsChartData/daily/{d}",
                 metric, start, end,
             )
 
         elif data_type == DataType.BODY_BATTERY:
-            return self._daily_gql(
+            result = self._daily_gql(
                 lambda d: f'query{{epochChartScalar(date:"{d}", include:["bodyBattery","stress"])}}',
                 metric, start, end,
             )
 
         elif data_type == DataType.WEIGHT:
-            return self._range_gql(
+            result = self._range_gql(
                 f'query{{weightScalar(startDate:"{s}", endDate:"{e}")}}',
                 metric,
             )
 
         elif data_type == DataType.BODY_COMPOSITION:
-            return self._range_rest(
-                f"/gc-api/weight-service/weight/dateRange?startDate={s}&endDate={e}",
+            result = self._range_rest(
+                f"weight-service/weight/dateRange?startDate={s}&endDate={e}",
                 metric,
             )
 
         elif data_type == DataType.ENDURANCE_SCORE:
-            return self._daily_rest(
-                lambda d: f"/gc-api/metrics-service/metrics/endurancescore?calendarDate={d}",
+            result = self._daily_rest(
+                lambda d: f"metrics-service/metrics/endurancescore?calendarDate={d}",
                 metric, start, end,
             )
 
         elif data_type == DataType.HILL_SCORE:
-            return self._daily_rest(
-                lambda d: f"/gc-api/metrics-service/metrics/hillscore?calendarDate={d}",
+            result = self._daily_rest(
+                lambda d: f"metrics-service/metrics/hillscore?calendarDate={d}",
                 metric, start, end,
             )
 
         elif data_type == DataType.DEVICE_INFO:
-            return self._simple_rest(
-                "/gc-api/device-service/deviceregistration/devices",
+            result = self._simple_rest(
+                "device-service/deviceregistration/devices",
                 metric,
             )
 
         elif data_type == DataType.RACE_PREDICTIONS:
-            return self._daily_rest(
+            result = self._daily_rest(
                 lambda d: (
-                    f"/gc-api/metrics-service/metrics/racepredictions/daily/{dn}"
+                    f"metrics-service/metrics/racepredictions/daily/{dn}"
                     f"?fromCalendarDate={d}&toCalendarDate={d}"
                 ),
                 metric, start, end,
             )
 
         elif data_type == DataType.ACTIVITY_DETAILS:
-            return self._fetch_per_activity("activity_details", metric, start, end)
+            result = self._fetch_per_activity("activity_details", metric, start, end)
 
         elif data_type == DataType.ACTIVITY_SPLITS:
-            return self._fetch_per_activity("activity_splits", metric, start, end)
+            result = self._fetch_per_activity("activity_splits", metric, start, end)
 
         elif data_type == DataType.ACTIVITY_WEATHER:
-            return self._fetch_per_activity("activity_weather", metric, start, end)
+            result = self._fetch_per_activity("activity_weather", metric, start, end)
 
         elif data_type == DataType.ACTIVITY_HR_ZONES:
-            return self._fetch_per_activity("activity_hr_zones", metric, start, end)
+            result = self._fetch_per_activity("activity_hr_zones", metric, start, end)
 
         elif data_type == DataType.ACTIVITY_EXERCISE_SETS:
-            return self._fetch_per_activity("activity_exercise_sets", metric, start, end)
+            result = self._fetch_per_activity("activity_exercise_sets", metric, start, end)
 
         else:
             raise GarminConnectorError(f"Unsupported data type: {data_type}")
+
+        self.save_tokens()
+        return result
