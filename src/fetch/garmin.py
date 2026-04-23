@@ -1,7 +1,11 @@
 """
 Garmin Data Fetcher
 -------------------
-Fetches various types of Garmin Connect user data via the garminconnect library.
+Fetches Garmin Connect data using OAuth DI tokens (mobile SSO flow).
+
+Authentication: tokens stored in GCS (GARMIN_TOKENSTORE_GCS).
+Bootstrap: run scripts/garmin_bootstrap_tokens.py once to create initial tokens.
+Cloud Run: loads tokens from GCS, auto-refreshes, re-uploads after each job.
 
 Supported data types (29):
  - activities, activity_details, activity_splits, activity_weather,
@@ -15,17 +19,21 @@ Supported data types (29):
 
 import logging
 import os
-import tempfile
 import time
-from datetime import datetime, timedelta
+from datetime import date, timedelta
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
-from garminconnect import Garmin
+from garminconnect import (
+    Garmin,
+    GarminConnectAuthenticationError,
+    GarminConnectConnectionError,
+)
 
 logger = logging.getLogger(__name__)
 
+GQL_PATH = "graphql-gateway/graphql"
 DEFAULT_DAYS = 3
 
 
@@ -63,55 +71,35 @@ class DataType(Enum):
     HILL_SCORE = "hill_score"
 
 
-METRICS_CONFIG = {
-    "sleep":              {"method": "get_sleep_data",             "type": "daily"},
-    "steps":              {"method": "get_steps_data",             "type": "daily"},
-    "heart_rate":         {"method": "get_heart_rates",            "type": "daily"},
-    "stress":             {"method": "get_all_day_stress",         "type": "daily"},
-    "user_summary":       {"method": "get_user_summary",           "type": "daily"},
-    "stats_and_body":     {"method": "get_stats_and_body",         "type": "daily"},
-    "training_readiness": {"method": "get_training_readiness",     "type": "daily"},
-    "rhr_daily":          {"method": "get_rhr_day",                "type": "daily"},
-    "spo2":               {"method": "get_spo2_data",              "type": "daily"},
-    "respiration":        {"method": "get_respiration_data",       "type": "daily"},
-    "intensity_minutes":  {"method": "get_intensity_minutes_data", "type": "daily"},
-    "max_metrics":        {"method": "get_max_metrics",            "type": "daily"},
-    "all_day_events":     {"method": "get_all_day_events",         "type": "daily"},
-    "training_status":    {"method": "get_training_status",        "type": "daily"},
-    "hrv":                {"method": "get_hrv_data",               "type": "daily"},
-    "floors":             {"method": "get_floors",                 "type": "daily"},
-    "activities":             {"method": "get_activities_by_date",      "type": "range"},
-    "body_battery":           {"method": "get_body_battery",            "type": "range", "chunk_days": 28},
-    "weight":                 {"method": "get_weigh_ins",               "type": "range"},
-    "body_composition":       {"method": "get_body_composition",        "type": "range"},
-    "endurance_score":        {"method": "get_endurance_score",         "type": "range", "chunk_days": 28},
-    "hill_score":             {"method": "get_hill_score",              "type": "range", "chunk_days": 28},
-    "device_info":            {"method": "get_devices",                 "type": "simple"},
-    "race_predictions":       {"method": "get_race_predictions",        "type": "simple"},
-    "activity_details":       {"method": "get_activity_details",        "type": "activity_detail"},
-    "activity_splits":        {"method": "get_activity_splits",         "type": "activity_subdata"},
-    "activity_weather":       {"method": "get_activity_weather",        "type": "activity_subdata"},
-    "activity_hr_zones":      {"method": "get_activity_hr_in_timezones", "type": "activity_subdata"},
-    "activity_exercise_sets": {"method": "get_activity_exercise_sets",  "type": "activity_subdata"},
-}
-
-
 class GarminConnectorError(Exception):
     pass
 
 
 class GarminConnector:
-    """Garmin Connect data connector with support for multiple data types."""
+    """
+    Garmin Connect data connector.
+
+    Loads OAuth DI tokens from GCS, authenticates via garminconnect library
+    (mobile SSO — no browser required), and calls Garmin Connect REST and
+    GraphQL endpoints. Re-uploads tokens to GCS after each fetch to persist
+    any auto-refresh.
+
+    Bootstrap: run scripts/garmin_bootstrap_tokens.py once from a machine
+    with credentials to create the initial token file in GCS.
+    """
+
+    TOKEN_FILE = "garmin_tokens.json"
+    TMP_TOKEN_DIR = "/tmp/garmin_tokens"
 
     def __init__(self, username: str, password: str, tokenstore_gcs: str = ""):
         self.username = username
         self.password = password
         self.tokenstore_gcs = tokenstore_gcs
-        self._client: Optional[Garmin] = None
+        self._garmin: Optional[Garmin] = None
+        self._display_name: Optional[str] = None
 
     @classmethod
     def from_env(cls) -> "GarminConnector":
-        """Create a GarminConnector from environment variables."""
         missing = [k for k in ("GARMIN_USERNAME", "GARMIN_PASSWORD") if not os.getenv(k)]
         if missing:
             raise GarminConnectorError(
@@ -123,540 +111,466 @@ class GarminConnector:
             tokenstore_gcs=os.getenv("GARMIN_TOKENSTORE_GCS", ""),
         )
 
-    _TOKEN_FILE = "garmin_tokens.json"
+    # -------------------------------------------------------------------------
+    # Token storage helpers
+    # -------------------------------------------------------------------------
 
-    def _download_token_from_gcs(self, local_dir: str) -> bool:
-        """Download garmin_tokens.json from GCS into a local directory."""
+    def _download_tokens_from_gcs(self) -> str:
+        """Download garmin_tokens.json from GCS and return its content."""
         if not self.tokenstore_gcs:
-            return False
+            raise GarminConnectorError(
+                "GARMIN_TOKENSTORE_GCS not set. "
+                "Run scripts/garmin_bootstrap_tokens.py first."
+            )
         try:
             from google.cloud import storage
+
             gcs_path = self.tokenstore_gcs[len("gs://"):]
             bucket_name, prefix = gcs_path.split("/", 1)
-            gcs_prefix = prefix.rstrip("/")
             client = storage.Client()
             bucket = client.bucket(bucket_name)
-            blob = bucket.blob(f"{gcs_prefix}/{self._TOKEN_FILE}")
-            if blob.exists():
-                blob.download_to_filename(os.path.join(local_dir, self._TOKEN_FILE))
-                logger.info(f"Downloaded gs://{bucket_name}/{gcs_prefix}/{self._TOKEN_FILE}")
-                return True
-            logger.warning(f"Not found: gs://{bucket_name}/{gcs_prefix}/{self._TOKEN_FILE}")
-            return False
+            blob = bucket.blob(f"{prefix.rstrip('/')}/{self.TOKEN_FILE}")
+            if not blob.exists():
+                raise GarminConnectorError(
+                    f"Token file not found in GCS: {self.TOKEN_FILE}. "
+                    "Run scripts/garmin_bootstrap_tokens.py first."
+                )
+            return blob.download_as_text()
+        except GarminConnectorError:
+            raise
         except Exception as e:
-            logger.warning(f"Failed to download tokens from GCS: {e}")
-            return False
+            raise GarminConnectorError(
+                f"Failed to download tokens from GCS: {e}"
+            ) from e
 
-    def _upload_token_to_gcs(self, local_dir: str) -> None:
-        """Upload garmin_tokens.json from a local directory to GCS."""
+    def _upload_tokens_to_gcs(self, token_json: str) -> None:
+        """Upload token JSON string back to GCS."""
         if not self.tokenstore_gcs:
             return
         try:
             from google.cloud import storage
+
             gcs_path = self.tokenstore_gcs[len("gs://"):]
             bucket_name, prefix = gcs_path.split("/", 1)
-            gcs_prefix = prefix.rstrip("/")
             client = storage.Client()
             bucket = client.bucket(bucket_name)
-            local_path = os.path.join(local_dir, self._TOKEN_FILE)
-            if os.path.exists(local_path):
-                blob = bucket.blob(f"{gcs_prefix}/{self._TOKEN_FILE}")
-                blob.upload_from_filename(local_path)
-                logger.info(f"Uploaded gs://{bucket_name}/{gcs_prefix}/{self._TOKEN_FILE}")
+            blob = bucket.blob(f"{prefix.rstrip('/')}/{self.TOKEN_FILE}")
+            blob.upload_from_string(token_json, content_type="application/json")
+            logger.info("Tokens re-uploaded to GCS")
         except Exception as e:
             logger.warning(f"Failed to upload tokens to GCS: {e}")
 
-    # Headers required by Garmin/Cloudflare — the library only sets them
-    # during password login (_establish_session), not when loading from tokenstore.
-    _BROWSER_HEADERS = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-    }
+    # -------------------------------------------------------------------------
+    # Authentication
+    # -------------------------------------------------------------------------
 
-    def authenticate(self, data_types: List[DataType]) -> None:
-        """Authenticate to Garmin Connect with token caching on GCS.
-
-        1. Try to load cached tokens from GCS (no SSO login needed)
-        2. If no cache or expired, fall back to username/password login
-        3. Save refreshed tokens back to GCS
+    def authenticate(self, data_types=None) -> None:
         """
-        with tempfile.TemporaryDirectory() as token_dir:
-            self._client = Garmin(self.username, self.password)
+        Load OAuth tokens from GCS and authenticate via garminconnect.
 
-            # Try cached tokens first
-            if self._download_token_from_gcs(token_dir):
-                try:
-                    # Set browser headers BEFORE login — the library skips this
-                    # when loading from tokenstore, causing Cloudflare/Garmin to
-                    # reject requests made with the default python-requests UA.
-                    self._client.client.cs.headers.update(self._BROWSER_HEADERS)
-                    self._client.login(tokenstore=token_dir)
-                    logger.info("Authenticated via cached tokens")
-                    self._client.client.dump(token_dir)
-                    self._upload_token_to_gcs(token_dir)
-                    return
-                except Exception as e:
-                    logger.warning(f"Cached tokens invalid, falling back to login: {e}")
+        Writes tokens to a temp directory, calls garmin.login() which loads
+        them and fetches the user profile (display_name). Cleans up the temp
+        file afterward.
+        """
+        token_json = self._download_tokens_from_gcs()
 
-            # Fall back to username/password
+        tmp_dir = Path(self.TMP_TOKEN_DIR)
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        token_file = tmp_dir / self.TOKEN_FILE
+        token_file.write_text(token_json)
+
+        try:
+            garmin = Garmin()
+            garmin.login(str(tmp_dir))
+        except GarminConnectAuthenticationError as e:
+            raise GarminConnectorError(
+                "Garmin authentication failed — tokens may be expired or revoked. "
+                f"Re-run scripts/garmin_bootstrap_tokens.py. ({e})"
+            ) from e
+        except GarminConnectConnectionError as e:
+            raise GarminConnectorError(
+                f"Garmin connection error during auth: {e}"
+            ) from e
+        finally:
+            token_file.unlink(missing_ok=True)
+
+        self._garmin = garmin
+        self._display_name = garmin.display_name
+        logger.info(f"Authenticated as {self._display_name}")
+
+    def save_tokens(self) -> None:
+        """Re-upload tokens to GCS (persists any auto-refresh that occurred)."""
+        if self._garmin is None:
+            return
+        self._upload_tokens_to_gcs(self._garmin.client.dumps())
+
+    # -------------------------------------------------------------------------
+    # HTTP helpers
+    # -------------------------------------------------------------------------
+
+    def _get(self, path: str, retries: int = 3) -> Optional[Any]:
+        """GET request via garminconnect (connectapi.garmin.com)."""
+        for attempt in range(retries):
             try:
-                self._client.login()
-                logger.info("Authenticated via username/password")
-                self._client.client.dump(token_dir)
-                self._upload_token_to_gcs(token_dir)
-            except Exception as e:
-                raise GarminConnectorError(f"Authentication failed: {e}") from e
-
-    def _call_with_retry(self, fn: Callable, *args, max_retries: int = 3, **kwargs) -> Any:
-        """Call a Garmin API function with retry and exponential backoff on 429 errors."""
-        for attempt in range(max_retries + 1):
-            try:
-                return fn(*args, **kwargs)
-            except Exception as e:
-                if "429" in str(e) and attempt < max_retries:
-                    wait = 2 ** (attempt + 1)  # 2s, 4s, 8s
-                    logger.warning(f"429 Too Many Requests, retry {attempt + 1}/{max_retries} in {wait}s...")
+                return self._garmin.client.connectapi(path)
+            except GarminConnectAuthenticationError as e:
+                raise GarminConnectorError(
+                    f"Auth error — re-run bootstrap script. ({e})"
+                ) from e
+            except GarminConnectConnectionError as e:
+                if "429" in str(e):
+                    wait = 2 ** (attempt + 1)
+                    logger.warning(f"429 on {path}, retrying in {wait}s")
                     time.sleep(wait)
-                else:
-                    raise
-
-    @property
-    def client(self) -> Garmin:
-        if self._client is None:
-            raise GarminConnectorError("Not authenticated. Call authenticate() first.")
-        return self._client
-
-    def fetch_data(self, data_type: DataType, **kwargs) -> List[Dict[str, Any]]:
-        """Dispatch fetch by DataType using METRICS_CONFIG."""
-        metric_name = data_type.value
-        config = METRICS_CONFIG.get(metric_name)
-        if not config:
-            raise GarminConnectorError(f"Unsupported data type: {data_type}")
-
-        days = kwargs.get("days", DEFAULT_DAYS)
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=days)
-
-        method_name = config["method"]
-        fetch_type = config["type"]
-
-        if not hasattr(self.client, method_name):
-            raise GarminConnectorError(f"Client missing method: {method_name}")
-
-        method = getattr(self.client, method_name)
-
-        logger.info(f"Fetching {metric_name} ({fetch_type}, {days} days)...")
-
-        if fetch_type == "daily":
-            return self._fetch_daily(method, metric_name, start_date, end_date)
-        elif fetch_type == "range":
-            chunk_days = config.get("chunk_days", 364)
-            return self._fetch_range(method, metric_name, start_date, end_date, chunk_days)
-        elif fetch_type == "simple":
-            return self._fetch_simple(method, metric_name)
-        elif fetch_type == "activity_detail":
-            return self._fetch_activity_details(self.client, start_date, end_date)
-        elif fetch_type == "activity_subdata":
-            return self._fetch_activity_subdata(self.client, metric_name, method_name, start_date, end_date)
-        else:
-            raise GarminConnectorError(f"Unknown fetch type: {fetch_type}")
-
-    # -------------------------------------------------------------------------
-    # Fetch strategies (ported from old/connectors/garmin/fetcher.py)
-    # -------------------------------------------------------------------------
-
-    def _fetch_daily(
-        self, method: Callable, metric_name: str, start: datetime, end: datetime
-    ) -> List[Dict[str, Any]]:
-        """Fetch data day by day."""
-        results = []
-        current = start
-
-        while current <= end:
-            date_str = current.strftime("%Y-%m-%d")
-            try:
-                data = self._call_with_retry(method, date_str)
-                if data:
-                    data = flatten_nested_arrays(data, path=f"{metric_name}.{date_str}")
-
-                    if isinstance(data, list):
-                        for item in data:
-                            if isinstance(item, dict):
-                                item["date"] = date_str
-                                item["data_type"] = metric_name
-                                results.append(item)
-                    elif isinstance(data, dict):
-                        data["date"] = date_str
-                        data["data_type"] = metric_name
-                        results.append(data)
-                    else:
-                        results.append({
-                            "date": date_str,
-                            "data": data,
-                            "data_type": metric_name,
-                        })
-
-                time.sleep(0.3)
+                    continue
+                logger.warning(f"GET {path} error: {e}")
+                return None
             except Exception as e:
-                logger.warning(f"Error fetching {metric_name} for {date_str}: {e}")
+                logger.warning(f"GET {path} unexpected error: {e}")
+                return None
+        return None
 
-            current += timedelta(days=1)
+    def _gql(self, query: str, retries: int = 3) -> Optional[Any]:
+        """GraphQL POST via garminconnect (connectapi.garmin.com)."""
+        for attempt in range(retries):
+            try:
+                data = self._garmin.client.post(
+                    "", GQL_PATH, json={"query": query}, api=True
+                )
+                if isinstance(data, dict) and "data" in data:
+                    inner = data["data"]
+                    if isinstance(inner, dict) and len(inner) == 1:
+                        return list(inner.values())[0]
+                    return inner
+                return data
+            except GarminConnectAuthenticationError as e:
+                raise GarminConnectorError(
+                    f"Auth error — re-run bootstrap script. ({e})"
+                ) from e
+            except GarminConnectConnectionError as e:
+                if "429" in str(e):
+                    wait = 2 ** (attempt + 1)
+                    logger.warning(f"429 on GQL, retrying in {wait}s")
+                    time.sleep(wait)
+                    continue
+                logger.warning(f"GQL error: {e}")
+                return None
+            except Exception as e:
+                logger.warning(f"GQL unexpected error: {e}")
+                return None
+        return None
 
-        logger.info(f"Fetched {metric_name}: {len(results)} entries")
+    # -------------------------------------------------------------------------
+    # Normalization
+    # -------------------------------------------------------------------------
+
+    def _to_list(
+        self, data: Any, metric: str, date_str: str = None
+    ) -> List[Dict]:
+        """Normalize any API response to list[dict] with data_type (+ date)."""
+        if data is None:
+            return []
+        items = data if isinstance(data, list) else [data]
+        results = []
+        for item in items:
+            if not isinstance(item, dict):
+                item = {"value": item}
+            item["data_type"] = metric
+            if date_str:
+                item.setdefault("date", date_str)
+            results.append(item)
         return results
 
-    def _fetch_range(
-        self,
-        method: Callable,
-        metric_name: str,
-        start: datetime,
-        end: datetime,
-        chunk_days: int = 364,
-    ) -> List[Dict[str, Any]]:
-        """Fetch data using a date range, chunking if necessary."""
-        try:
-            results = []
-            current_start = start
+    # -------------------------------------------------------------------------
+    # Fetch strategies
+    # -------------------------------------------------------------------------
 
-            while current_start <= end:
-                current_end = min(current_start + timedelta(days=chunk_days), end)
-                start_str = current_start.strftime("%Y-%m-%d")
-                end_str = current_end.strftime("%Y-%m-%d")
+    def _daily_rest(self, url_fn, metric: str, start: date, end: date) -> List[Dict]:
+        """Call url_fn(date_str) once per day."""
+        results = []
+        d = start
+        while d <= end:
+            ds = d.isoformat()
+            data = self._get(url_fn(ds))
+            results.extend(self._to_list(data, metric, ds))
+            time.sleep(0.3)
+            d += timedelta(days=1)
+        logger.info(f"Fetched {metric}: {len(results)} entries")
+        return results
 
-                logger.info(f"  Fetching chunk: {start_str} to {end_str}")
+    def _daily_gql(self, query_fn, metric: str, start: date, end: date) -> List[Dict]:
+        """Call query_fn(date_str) as GraphQL once per day."""
+        results = []
+        d = start
+        while d <= end:
+            ds = d.isoformat()
+            data = self._gql(query_fn(ds))
+            results.extend(self._to_list(data, metric, ds))
+            time.sleep(0.3)
+            d += timedelta(days=1)
+        logger.info(f"Fetched {metric}: {len(results)} entries")
+        return results
 
-                chunk_data = None
-                try:
-                    chunk_data = self._call_with_retry(method, start_str, end_str)
-                except TypeError:
-                    logger.debug(f"Method {method.__name__} rejected range args, trying without")
-                    chunk_data = self._call_with_retry(method)
-                    current_start = end + timedelta(days=1)
-
-                if chunk_data:
-                    # Special handling for weight
-                    if metric_name == "weight" and isinstance(chunk_data, dict):
-                        if "dailyWeightSummaries" in chunk_data and isinstance(chunk_data["dailyWeightSummaries"], list):
-                            all_weight_entries = []
-                            for daily_summary in chunk_data["dailyWeightSummaries"]:
-                                if isinstance(daily_summary, dict) and "allWeightMetrics" in daily_summary:
-                                    summary_date = daily_summary.get("summaryDate")
-                                    for entry in daily_summary["allWeightMetrics"]:
-                                        if isinstance(entry, dict):
-                                            if summary_date and "summaryDate" not in entry:
-                                                entry["summaryDate"] = summary_date
-                                            all_weight_entries.append(entry)
-                            chunk_data = all_weight_entries
-                            logger.info(f"Flattened weight data: {len(chunk_data)} entries")
-                        elif "allWeightMetrics" in chunk_data:
-                            summary_date = chunk_data.get("summaryDate")
-                            chunk_data = chunk_data["allWeightMetrics"]
-                            if summary_date and isinstance(chunk_data, list):
-                                for entry in chunk_data:
-                                    if isinstance(entry, dict) and "summaryDate" not in entry:
-                                        entry["summaryDate"] = summary_date
-                            logger.info(f"Flattened weight data: {len(chunk_data)} entries")
-
-                    # Special handling for body_composition
-                    elif metric_name == "body_composition" and isinstance(chunk_data, dict) and "dateWeightList" in chunk_data:
-                        chunk_data = chunk_data["dateWeightList"]
-                        logger.info(f"Flattened body_composition data: {len(chunk_data)} entries")
-                    else:
-                        chunk_data = flatten_nested_arrays(chunk_data, path=metric_name)
-
-                    if isinstance(chunk_data, list):
-                        for item in chunk_data:
-                            if isinstance(item, dict):
-                                item["data_type"] = metric_name
-                            results.append(item)
-                    elif isinstance(chunk_data, dict):
-                        chunk_data["data_type"] = metric_name
-                        results.append(chunk_data)
-                    else:
-                        results.append({"data": chunk_data, "data_type": metric_name})
-
-                current_start = current_end + timedelta(days=1)
-                if current_start <= end:
-                    time.sleep(1)
-
-            logger.info(f"Fetched {metric_name}: {len(results)} items")
-            return results
-
-        except Exception as e:
-            logger.error(f"Error fetching {metric_name} (range): {e}")
-            return []
-
-    def _fetch_simple(self, method: Callable, metric_name: str) -> List[Dict[str, Any]]:
-        """Fetch data without parameters."""
-        try:
-            data = self._call_with_retry(method)
-            if not data:
-                return []
-
-            data = flatten_nested_arrays(data, path=metric_name)
-
-            results = []
-            if isinstance(data, list):
-                for item in data:
-                    if isinstance(item, dict):
-                        item["data_type"] = metric_name
-                    results.append(item)
-            elif isinstance(data, dict):
-                data["data_type"] = metric_name
-                results.append(data)
-            else:
-                results.append({"data": data, "data_type": metric_name})
-
-            logger.info(f"Fetched {metric_name}: {len(results)} items")
-            return results
-        except Exception as e:
-            logger.error(f"Error fetching {metric_name} (simple): {e}")
-            return []
-
-    def _fetch_activity_details(
-        self, client: Garmin, start: datetime, end: datetime
-    ) -> List[Dict[str, Any]]:
-        """Special handling for activity details (requires 2 steps)."""
-        try:
-            activities = self._call_with_retry(
-                client.get_activities_by_date,
-                start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
-            )
-
-            results = []
-            for activity in activities:
-                activity_id = activity.get("activityId")
-                if not activity_id:
-                    continue
-
-                try:
-                    details = self._call_with_retry(client.get_activity_details, activity_id, maxchart=2000, maxpoly=4000)
-
-                    clean_activity = flatten_nested_arrays(activity, path=f"activity_{activity_id}")
-                    clean_details = flatten_nested_arrays(details, path=f"details_{activity_id}")
-
-                    enriched = {
-                        **clean_activity,
-                        "detailed_data": clean_details,
-                        "data_type": "activity_details",
-                    }
-                    results.append(enriched)
-                    time.sleep(0.5)
-                except Exception as e:
-                    logger.warning(f"Failed details for {activity_id}: {e}")
-
-            logger.info(f"Fetched details for {len(results)} activities")
-            return results
-        except Exception as e:
-            logger.error(f"Error fetching activity details: {e}")
-            return []
-
-    def _fetch_activity_subdata(
-        self,
-        client: Garmin,
-        metric_name: str,
-        method_name: str,
-        start: datetime,
-        end: datetime,
-    ) -> List[Dict[str, Any]]:
-        """Generic fetcher for activity-related subdata (splits, weather, etc)."""
-        try:
-            activities = self._call_with_retry(
-                client.get_activities_by_date,
-                start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
-            )
-
-            results = []
-            method = getattr(client, method_name)
-
-            for activity in activities:
-                activity_id = activity.get("activityId")
-                if not activity_id:
-                    continue
-
-                try:
-                    if metric_name == "activity_splits":
-                        splits = self._call_with_retry(client.get_activity_splits, activity_id)
-                        typed_splits = self._call_with_retry(client.get_activity_typed_splits, activity_id)
-                        split_summaries = self._call_with_retry(client.get_activity_split_summaries, activity_id)
-
-                        clean_splits = flatten_nested_arrays(splits, path=f"splits_{activity_id}")
-                        clean_typed = flatten_nested_arrays(typed_splits, path=f"typed_splits_{activity_id}")
-                        clean_summaries = flatten_nested_arrays(split_summaries, path=f"summaries_{activity_id}")
-
-                        data = {
-                            "activityId": activity_id,
-                            "activityName": activity.get("activityName", ""),
-                            "activityType": activity.get("activityType", ""),
-                            "startTimeLocal": activity.get("startTimeLocal", ""),
-                            "splits": clean_splits,
-                            "typed_splits": clean_typed,
-                            "split_summaries": clean_summaries,
-                            "data_type": metric_name,
-                        }
-                    else:
-                        subdata = self._call_with_retry(method, activity_id)
-                        if not subdata:
-                            continue
-
-                        clean_subdata = flatten_nested_arrays(subdata, path=f"{metric_name}_{activity_id}")
-
-                        data = {
-                            "activityId": activity_id,
-                            "activityName": activity.get("activityName", ""),
-                            "activityType": activity.get("activityType", ""),
-                            "startTimeLocal": activity.get("startTimeLocal", ""),
-                            "data_type": metric_name,
-                        }
-                        # Key naming matches original script
-                        if metric_name == "activity_weather":
-                            data["weather_data"] = clean_subdata
-                        elif metric_name == "activity_hr_zones":
-                            data["hr_zones_data"] = clean_subdata
-                        elif metric_name == "activity_exercise_sets":
-                            data["exercise_sets_data"] = clean_subdata
-                        else:
-                            data[f"{metric_name}_data"] = clean_subdata
-
-                    results.append(data)
-                    time.sleep(0.3)
-                except Exception as e:
-                    logger.warning(f"Failed {metric_name} for {activity_id}: {e}")
-
-            logger.info(f"Fetched {metric_name} for {len(results)} activities")
-            return results
-        except Exception as e:
-            logger.error(f"Error fetching {metric_name}: {e}")
-            return []
-
-
-# -----------------------------------------------------------------------------
-# flatten_nested_arrays — ported from old/connectors/garmin/utils.py
-# -----------------------------------------------------------------------------
-
-def flatten_nested_arrays(
-    obj: Any,
-    known_mappings: Dict[str, Any] = None,
-    path: str = "",
-) -> Any:
-    """
-    Recursively transform nested arrays for BigQuery compatibility.
-
-    BigQuery does not support nested arrays ([[a,b]]).
-    This function transforms them into arrays of objects ([{x:a, y:b}]).
-    """
-    if known_mappings is None:
-        known_mappings = {
-            "stressValuesArray": ["timestamp", "type", "value", "score"],
-            "respirationAveragesValuesArray": ["timestamp", "average", "high", "low"],
-            "floorValuesArray": ["start_time", "end_time", "ascended", "descended"],
-            "spO2SingleValues": ["timestamp", "value", "type"],
-            "bodyBatteryValuesArray": {
-                2: ["timestamp", "value"],
-                4: ["timestamp", "type", "value", "score"],
-            },
-        }
-
-    # Case 1: Dict — recurse on each key
-    if isinstance(obj, dict):
-        # Special handling for Garmin activity details metrics
-        if "metricDescriptors" in obj and "activityDetailMetrics" in obj:
-            try:
-                descriptors = obj["metricDescriptors"]
-                metrics_list = obj["activityDetailMetrics"]
-
-                index_map = {
-                    d["metricsIndex"]: d["key"]
-                    for d in descriptors
-                    if "metricsIndex" in d and "key" in d
-                }
-
-                new_metrics = []
-                for item in metrics_list:
-                    if not isinstance(item, dict) or "metrics" not in item:
-                        continue
-
-                    raw_values = item["metrics"]
-                    if not isinstance(raw_values, list):
-                        continue
-
-                    structured_metric = {}
-                    for i, value in enumerate(raw_values):
-                        if value is not None and i in index_map:
-                            structured_metric[index_map[i]] = value
-
-                    new_metrics.append(structured_metric)
-
-                obj["activityDetailMetrics"] = new_metrics
-                logger.debug(f"Transformed activityDetailMetrics at '{path}' using descriptors")
-            except Exception as e:
-                logger.warning(f"Failed to transform activityDetailMetrics at '{path}': {e}")
-
-        result = {}
-        for key, value in obj.items():
-            # Skip None values to avoid BigQuery REQUIRED field errors
-            if value is None:
-                continue
-
-            # Replace empty dicts — BigQuery auto-detection can't handle empty structs
-            if isinstance(value, dict) and not value:
-                result[key] = None
-                continue
-
-            # Check known mappings for nested arrays
-            if key in known_mappings and isinstance(value, list) and value and isinstance(value[0], list):
-                mapping = known_mappings[key]
-                field_names = None
-
-                item_len = len(value[0])
-                if isinstance(mapping, dict):
-                    field_names = mapping.get(item_len)
-                elif isinstance(mapping, list):
-                    field_names = mapping
-
-                if field_names:
-                    result[key] = [
-                        dict(zip(field_names, item[: len(field_names)]))
-                        for item in value
-                    ]
-                    logger.debug(f"Transformed nested array at '{path}.{key}' using mapping: {field_names}")
-                else:
-                    result[key] = flatten_nested_arrays(value, known_mappings, f"{path}.{key}")
-            else:
-                result[key] = flatten_nested_arrays(value, known_mappings, f"{path}.{key}")
+    def _range_rest(self, path: str, metric: str) -> List[Dict]:
+        data = self._get(path)
+        result = self._to_list(data, metric)
+        logger.info(f"Fetched {metric}: {len(result)} entries")
         return result
 
-    # Case 2: List — check for nested arrays
-    elif isinstance(obj, list):
-        if not obj:
-            return obj
+    def _range_gql(self, query: str, metric: str) -> List[Dict]:
+        data = self._gql(query)
+        result = self._to_list(data, metric)
+        logger.info(f"Fetched {metric}: {len(result)} entries")
+        return result
 
-        # Nested array detected: [[...], [...]]
-        if isinstance(obj[0], list):
-            first_item_length = len(obj[0])
+    def _simple_rest(self, path: str, metric: str) -> List[Dict]:
+        data = self._get(path)
+        result = self._to_list(data, metric)
+        logger.info(f"Fetched {metric}: {len(result)} entries")
+        return result
 
-            # 2-element arrays → {timestamp, value}
-            if first_item_length == 2:
-                result = [{"timestamp": item[0], "value": item[1]} for item in obj]
-                logger.debug(f"Transformed generic 2-element nested array at '{path}'")
-                return result
+    def _fetch_activities(
+        self, start_str: str, end_str: str, metric: str
+    ) -> List[Dict]:
+        """Fetch activities with pagination."""
+        results = []
+        offset = 0
+        while True:
+            path = (
+                f"activitylist-service/activities/search/activities"
+                f"?limit=100&start={offset}"
+                f"&startDate={start_str}&endDate={end_str}"
+            )
+            data = self._get(path)
+            if not data or not isinstance(data, list):
+                break
+            for item in data:
+                if isinstance(item, dict):
+                    item["data_type"] = metric
+                    results.append(item)
+            if len(data) < 100:
+                break
+            offset += 100
+            time.sleep(0.5)
+        logger.info(f"Fetched {metric}: {len(results)} activities")
+        return results
 
-            # >2 elements without mapping → generic keys
-            else:
-                logger.warning(
-                    f"Nested array with {first_item_length} elements found at '{path}' "
-                    f"without explicit mapping. Using generic keys: val_0, val_1, ..."
-                )
-                return [
-                    {f"val_{i}": val for i, val in enumerate(item)}
-                    for item in obj
-                ]
+    def _fetch_per_activity(
+        self, endpoint_key: str, metric: str, start: date, end: date
+    ) -> List[Dict]:
+        """Fetch per-activity sub-data (splits, weather, HR zones, etc.)."""
+        activities = self._fetch_activities(
+            start.isoformat(), end.isoformat(), "activities"
+        )
 
-        # Not a nested array — recurse on each element
+        url_fns = {
+            "activity_details": lambda aid: f"activity-service/activity/{aid}",
+            "activity_splits": lambda aid: f"activity-service/activity/{aid}/splits",
+            "activity_weather": lambda aid: f"activity-service/activity/{aid}/weather",
+            "activity_hr_zones": lambda aid: f"activity-service/activity/{aid}/hrTimeInZones",
+            "activity_exercise_sets": lambda aid: f"activity-service/activity/{aid}/exerciseSets",
+        }
+        url_fn = url_fns[endpoint_key]
+
+        results = []
+        for activity in activities:
+            aid = activity.get("activityId")
+            if not aid:
+                continue
+            data = self._get(url_fn(aid))
+            if not data:
+                continue
+            items = data if isinstance(data, list) else [data]
+            for item in items:
+                if isinstance(item, dict):
+                    item.setdefault("activityId", aid)
+                    item["data_type"] = metric
+                    results.append(item)
+            time.sleep(0.3)
+
+        logger.info(
+            f"Fetched {metric}: {len(results)} entries "
+            f"from {len(activities)} activities"
+        )
+        return results
+
+    # -------------------------------------------------------------------------
+    # Main dispatch
+    # -------------------------------------------------------------------------
+
+    def fetch_data(self, data_type: DataType, **kwargs) -> List[Dict[str, Any]]:
+        """Dispatch fetch by DataType. Saves tokens to GCS after completion."""
+        days = kwargs.get("days", DEFAULT_DAYS)
+        end = date.today()
+        start = end - timedelta(days=days)
+        s = start.isoformat()
+        e = end.isoformat()
+        dn = self._display_name
+        metric = data_type.value
+
+        logger.info(f"Fetching {metric} ({days} days, {s} → {e})...")
+
+        if data_type == DataType.ACTIVITIES:
+            result = self._fetch_activities(s, e, metric)
+
+        elif data_type == DataType.SLEEP:
+            result = self._daily_rest(
+                lambda d: f"wellness-service/wellness/dailySleepData/{dn}?date={d}",
+                metric, start, end,
+            )
+
+        elif data_type == DataType.STEPS:
+            result = self._daily_rest(
+                lambda d: f"usersummary-service/stats/steps/daily/{d}/{d}",
+                metric, start, end,
+            )
+
+        elif data_type == DataType.HEART_RATE:
+            result = self._daily_rest(
+                lambda d: f"wellness-service/wellness/dailyHeartRate/{dn}?date={d}",
+                metric, start, end,
+            )
+
+        elif data_type == DataType.STRESS:
+            result = self._daily_rest(
+                lambda d: f"wellness-service/wellness/dailyStress/{d}",
+                metric, start, end,
+            )
+
+        elif data_type == DataType.USER_SUMMARY:
+            result = self._daily_rest(
+                lambda d: f"usersummary-service/usersummary/daily/{dn}?calendarDate={d}",
+                metric, start, end,
+            )
+
+        elif data_type == DataType.STATS_AND_BODY:
+            result = self._daily_rest(
+                lambda d: f"usersummary-service/stats/daily/{d}/{d}",
+                metric, start, end,
+            )
+
+        elif data_type == DataType.RHR_DAILY:
+            result = self._daily_rest(
+                lambda d: f"wellness-service/wellness/dailyHeartRate/{dn}?date={d}",
+                metric, start, end,
+            )
+
+        elif data_type == DataType.SPO2:
+            result = self._daily_rest(
+                lambda d: f"wellness-service/wellness/dailySpo2/{d}",
+                metric, start, end,
+            )
+
+        elif data_type == DataType.RESPIRATION:
+            result = self._daily_rest(
+                lambda d: f"wellness-service/wellness/daily/respiration/{d}",
+                metric, start, end,
+            )
+
+        elif data_type == DataType.INTENSITY_MINUTES:
+            result = self._daily_rest(
+                lambda d: f"wellness-service/wellness/daily/im/{d}",
+                metric, start, end,
+            )
+
+        elif data_type == DataType.MAX_METRICS:
+            result = self._range_rest(
+                f"metrics-service/metrics/maxmet/daily/{s}/{e}",
+                metric,
+            )
+
+        elif data_type == DataType.ALL_DAY_EVENTS:
+            result = self._daily_gql(
+                lambda d: f'query{{dailyEventsScalar(date:"{d}")}}',
+                metric, start, end,
+            )
+
+        elif data_type == DataType.TRAINING_STATUS:
+            result = self._daily_gql(
+                lambda d: f'query{{trainingStatusDailyScalar(calendarDate:"{d}")}}',
+                metric, start, end,
+            )
+
+        elif data_type == DataType.TRAINING_READINESS:
+            result = self._range_gql(
+                f'query{{trainingReadinessRangeScalar(startDate:"{s}", endDate:"{e}")}}',
+                metric,
+            )
+
+        elif data_type == DataType.HRV:
+            result = self._range_gql(
+                f'query{{heartRateVariabilityScalar(startDate:"{s}", endDate:"{e}")}}',
+                metric,
+            )
+
+        elif data_type == DataType.FLOORS:
+            result = self._daily_rest(
+                lambda d: f"wellness-service/wellness/floorsChartData/daily/{d}",
+                metric, start, end,
+            )
+
+        elif data_type == DataType.BODY_BATTERY:
+            result = self._daily_gql(
+                lambda d: f'query{{epochChartScalar(date:"{d}", include:["bodyBattery","stress"])}}',
+                metric, start, end,
+            )
+
+        elif data_type == DataType.WEIGHT:
+            result = self._range_gql(
+                f'query{{weightScalar(startDate:"{s}", endDate:"{e}")}}',
+                metric,
+            )
+
+        elif data_type == DataType.BODY_COMPOSITION:
+            result = self._range_rest(
+                f"weight-service/weight/dateRange?startDate={s}&endDate={e}",
+                metric,
+            )
+
+        elif data_type == DataType.ENDURANCE_SCORE:
+            result = self._daily_rest(
+                lambda d: f"metrics-service/metrics/endurancescore?calendarDate={d}",
+                metric, start, end,
+            )
+
+        elif data_type == DataType.HILL_SCORE:
+            result = self._daily_rest(
+                lambda d: f"metrics-service/metrics/hillscore?calendarDate={d}",
+                metric, start, end,
+            )
+
+        elif data_type == DataType.DEVICE_INFO:
+            result = self._simple_rest(
+                "device-service/deviceregistration/devices",
+                metric,
+            )
+
+        elif data_type == DataType.RACE_PREDICTIONS:
+            result = self._daily_rest(
+                lambda d: (
+                    f"metrics-service/metrics/racepredictions/daily/{dn}"
+                    f"?fromCalendarDate={d}&toCalendarDate={d}"
+                ),
+                metric, start, end,
+            )
+
+        elif data_type == DataType.ACTIVITY_DETAILS:
+            result = self._fetch_per_activity("activity_details", metric, start, end)
+
+        elif data_type == DataType.ACTIVITY_SPLITS:
+            result = self._fetch_per_activity("activity_splits", metric, start, end)
+
+        elif data_type == DataType.ACTIVITY_WEATHER:
+            result = self._fetch_per_activity("activity_weather", metric, start, end)
+
+        elif data_type == DataType.ACTIVITY_HR_ZONES:
+            result = self._fetch_per_activity("activity_hr_zones", metric, start, end)
+
+        elif data_type == DataType.ACTIVITY_EXERCISE_SETS:
+            result = self._fetch_per_activity("activity_exercise_sets", metric, start, end)
+
         else:
-            return [flatten_nested_arrays(item, known_mappings, f"{path}[{i}]") for i, item in enumerate(obj)]
+            raise GarminConnectorError(f"Unsupported data type: {data_type}")
 
-    # Case 3: Primitive — return as-is
-    else:
-        return obj
+        self.save_tokens()
+        return result
