@@ -63,7 +63,7 @@ jobs:
           JOBS=$(gcloud run jobs list \
             --region ${{ env.REGION }} \
             --project ${{ env.PROJECT }} \
-            --format="value(metadata.name)")
+            --format="value(metadata.name)" | grep -E "^ela-dp-(garmin|spotify)-")
 
           for JOB_NAME in $JOBS; do
             echo "Updating $JOB_NAME..."
