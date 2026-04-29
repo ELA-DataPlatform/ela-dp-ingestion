@@ -16,6 +16,7 @@ Supported data types:
 
 import logging
 import os
+import time
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -26,7 +27,6 @@ from spotipy.oauth2 import SpotifyOAuth
 logger = logging.getLogger(__name__)
 
 DEFAULT_LIMIT = 50
-DEFAULT_TIMEZONE = "Europe/Paris"
 
 
 class DataType(Enum):
@@ -55,7 +55,6 @@ class SpotifyConfig:
     redirect_uri: str
     refresh_token: str
     cache_path: Path
-    timezone: str = DEFAULT_TIMEZONE
 
 
 class SpotifyConnectorError(Exception):
@@ -321,8 +320,6 @@ class SpotifyConnector:
 
     def fetch_album_tracks(self, ids: List[str], **kwargs) -> List[Dict[str, Any]]:
         """Fetch all tracks for each album ID (paginated). Injects album_id into each record."""
-        import time
-
         results = []
         failed = []
         batch_size = 50
@@ -350,8 +347,6 @@ class SpotifyConnector:
 
     def fetch_artist_albums(self, ids: List[str], **kwargs) -> List[Dict[str, Any]]:
         """Fetch all albums for each artist ID (paginated). Injects artist_id into each record."""
-        import time
-
         results = []
         failed = []
         batch_size = 50
