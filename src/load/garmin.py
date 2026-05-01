@@ -65,6 +65,7 @@ def load(
             write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
             autodetect=autodetect,
             schema=existing_schema,
+            ignore_unknown_values=True,
             schema_update_options=[
                 bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION,
             ],
