@@ -387,7 +387,7 @@ class GarminConnector:
         )
 
         url_fns = {
-            "activity_details": lambda aid: f"activity-service/activity/{aid}",
+            "activity_details": lambda aid: f"activity-service/activity/{aid}/details?maxChartSize=2000&maxPolylineSize=4000",
             "activity_splits": lambda aid: f"activity-service/activity/{aid}/splits",
             "activity_weather": lambda aid: f"activity-service/activity/{aid}/weather",
             "activity_hr_zones": lambda aid: f"activity-service/activity/{aid}/hrTimeInZones",
