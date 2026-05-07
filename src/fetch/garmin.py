@@ -438,7 +438,7 @@ class GarminConnector:
 
         elif data_type == DataType.SLEEP:
             result = self._daily_rest(
-                lambda d: f"wellness-service/wellness/dailySleepData/{dn}?date={d}",
+                lambda d: f"wellness-service/wellness/dailySleepData/{dn}?date={d}&nonSleepBufferMinutes=60",
                 metric, start, end,
             )
 
@@ -483,7 +483,7 @@ class GarminConnector:
 
         elif data_type == DataType.RHR_DAILY:
             result = self._daily_rest(
-                lambda d: f"wellness-service/wellness/dailyHeartRate/{dn}?date={d}",
+                lambda d: f"userstats-service/wellness/daily/{dn}?fromDate={d}&untilDate={d}&metricId=60",
                 metric, start, end,
             )
 
