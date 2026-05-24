@@ -1,11 +1,16 @@
 import argparse
+import json
 import logging
+import os
 import re
 import sys
-from datetime import datetime
+import urllib.request
+from datetime import date, datetime
 from pathlib import Path
 from typing import List
 
+import google.auth
+import google.auth.transport.requests
 import yaml
 from google.cloud import bigquery, storage
 
@@ -120,10 +125,57 @@ def _detect_data_type(uri: str, source: str, valid: dict, pattern: str):
     return None
 
 
+GARMIN_WORKFLOW_NAME = "ela-dp-garmin-daily"
+GARMIN_WORKFLOW_LOCATION = "europe-west1"
+
+
+def _sleep_flag_blob(env: str) -> "storage.Blob":
+    """Return the GCS blob for today's sleep trigger flag."""
+    today = date.today().isoformat()
+    client = storage.Client()
+    bucket = client.bucket(f"ela-source-{env}")
+    return bucket.blob(f"garmin/flags/garmin_triggered_{today}.flag")
+
+
+def _flag_exists(env: str) -> bool:
+    return _sleep_flag_blob(env).exists()
+
+
+def _write_flag(env: str) -> None:
+    blob = _sleep_flag_blob(env)
+    blob.upload_from_string("", content_type="text/plain")
+    logger.info(f"Flag written: gs://{blob.bucket.name}/{blob.name}")
+
+
+def _trigger_workflow(env: str) -> None:
+    """Trigger a Cloud Workflow execution via REST API."""
+    workflow_id = (
+        f"projects/ela-dp-{env}/locations/{GARMIN_WORKFLOW_LOCATION}"
+        f"/workflows/{GARMIN_WORKFLOW_NAME}"
+    )
+    credentials, _ = google.auth.default(
+        scopes=["https://www.googleapis.com/auth/cloud-platform"]
+    )
+    credentials.refresh(google.auth.transport.requests.Request())
+    url = f"https://workflowexecutions.googleapis.com/v1/{workflow_id}/executions"
+    req = urllib.request.Request(
+        url,
+        data=b"{}",
+        headers={
+            "Authorization": f"Bearer {credentials.token}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req) as resp:
+        body = json.loads(resp.read())
+    logger.info(f"Workflow triggered: {body.get('name')}")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Fetch data from external sources.")
-    parser.add_argument("--mode", choices=["fetch", "load", "all"], default="all",
-                        help="fetch: API→GCS only | load: GCS→BQ only | all: fetch+load")
+    parser.add_argument("--mode", choices=["fetch", "load", "all", "check_sleep", "poll_sleep"], default="all",
+                        help="fetch: API→GCS only | load: GCS→BQ only | all: fetch+load | check_sleep: exit 0 if today's sleep data is available | poll_sleep: check sleep + trigger workflow if ready")
     parser.add_argument("--env", required=True, choices=["dev", "prd"])
     parser.add_argument("--source", required=True, choices=list(SOURCE_MAP))
     parser.add_argument("--data-types", nargs="+", metavar="DATA_TYPE",
@@ -161,6 +213,42 @@ def main() -> None:
 
     valid = {dt.value: dt for dt in data_type_enum}
     filename_pattern = _get_filename_pattern(loading_config, args.source)
+
+    # --- CHECK SLEEP AVAILABILITY ---
+    if args.mode == "check_sleep":
+        if args.source != "garmin":
+            logger.error("--mode check_sleep only supports --source garmin")
+            sys.exit(2)
+        connector = GarminConnector.from_env()
+        connector.authenticate()
+        available = connector.check_sleep_available()
+        connector.save_tokens()
+        if available:
+            logger.info("Sleep data available for today")
+            sys.exit(0)
+        else:
+            logger.info("Sleep data not yet available for today")
+            sys.exit(1)
+
+    # --- POLL SLEEP (check + trigger workflow if ready) ---
+    if args.mode == "poll_sleep":
+        if args.source != "garmin":
+            logger.error("--mode poll_sleep only supports --source garmin")
+            sys.exit(2)
+        if _flag_exists(args.env):
+            logger.info("Workflow already triggered today, nothing to do")
+            sys.exit(0)
+        connector = GarminConnector.from_env()
+        connector.authenticate()
+        available = connector.check_sleep_available()
+        connector.save_tokens()
+        if not available:
+            logger.info("Sleep data not yet available, will retry later")
+            sys.exit(0)
+        _write_flag(args.env)
+        _trigger_workflow(args.env)
+        logger.info("Done — workflow triggered for today")
+        sys.exit(0)
 
     # --- LOAD ONLY ---
     if args.mode == "load":

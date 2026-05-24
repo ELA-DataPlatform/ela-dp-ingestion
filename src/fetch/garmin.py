@@ -606,3 +606,24 @@ class GarminConnector:
 
         self.save_tokens()
         return result
+
+    def check_sleep_available(self) -> bool:
+        """Return True if today's sleep data is available in Garmin Connect.
+
+        The API returns a dailySleepDTO object only once the watch has synced
+        the night's sleep. We consider data available when sleepStartTimestampGMT
+        is present (i.e. a real sleep session was recorded).
+        """
+        today = date.today().isoformat()
+        dn = self._display_name
+        data = self._get(
+            f"wellness-service/wellness/dailySleepData/{dn}"
+            f"?date={today}&nonSleepBufferMinutes=60"
+        )
+        if not data or not isinstance(data, dict):
+            return False
+        dto = data.get("dailySleepDTO")
+        return (
+            isinstance(dto, dict)
+            and dto.get("sleepStartTimestampGMT") is not None
+        )
