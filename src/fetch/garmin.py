@@ -7,14 +7,14 @@ Authentication: tokens stored in GCS (GARMIN_TOKENSTORE_GCS).
 Bootstrap: run scripts/garmin_bootstrap_tokens.py once to create initial tokens.
 Cloud Run: loads tokens from GCS, auto-refreshes, re-uploads after each job.
 
-Supported data types (29):
+Supported data types (30):
  - activities, activity_details, activity_splits, activity_weather,
    activity_hr_zones, activity_exercise_sets
  - sleep, steps, heart_rate, body_battery, stress, weight, body_composition
  - user_summary, stats_and_body, training_readiness, rhr_daily, spo2,
    respiration, intensity_minutes, max_metrics, all_day_events
  - device_info, training_status, hrv, race_predictions, floors,
-   endurance_score, hill_score
+   endurance_score, hill_score, lifestyle_logging
 """
 
 import logging
@@ -69,6 +69,7 @@ class DataType(Enum):
     FLOORS = "floors"
     ENDURANCE_SCORE = "endurance_score"
     HILL_SCORE = "hill_score"
+    LIFESTYLE_LOGGING = "lifestyle_logging"
 
 
 class GarminConnectorError(Exception):
@@ -568,6 +569,15 @@ class GarminConnector:
         elif data_type == DataType.HILL_SCORE:
             result = self._daily_rest(
                 lambda d: f"metrics-service/metrics/hillscore?calendarDate={d}",
+                metric, start, end,
+            )
+
+        elif data_type == DataType.LIFESTYLE_LOGGING:
+            # Manually-logged lifestyle entries (alcohol, caffeine, exercise tags,
+            # sleep factors...). The API returns a rolling window per request date;
+            # cross-file duplicates are deduped downstream in BQ via _ingested_at.
+            result = self._daily_rest(
+                lambda d: f"lifestylelogging-service/dailyLog/{d}",
                 metric, start, end,
             )
 

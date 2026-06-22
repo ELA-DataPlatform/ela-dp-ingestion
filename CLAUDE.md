@@ -10,6 +10,10 @@ Pipeline d'ingestion de données personnelles vers Google BigQuery. Fetch depuis
 - **Changements minimaux.** Ne modifie que ce qui est nécessaire. Pas de refacto non demandée.
 - **Pas de sur-ingénierie.** Privilégie le simple et lisible. IMPORTANT : ne propose pas d'abstractions, patterns ou dépendances supplémentaires sauf si je le demande explicitement.
 - **Pas de nouvelles dépendances** sans mon accord.
+- **Gestion des libs Python : TOUJOURS `uv`.** Jamais `pip` ni `python -m venv` à la main.
+  - Script jetable avec deps : `uv run --with <pkg>==<version> python <script>`.
+  - (Re)créer le venv : `uv venv venv --python 3.12` puis `uv pip install --python venv/bin/python <pkgs>`. Versions pinnées = celles du `Dockerfile`.
+  - `uv venv` n'installe **pas** `pip` dans le venv : `venv/bin/pip` n'existe pas. Toujours passer par `uv pip install --python venv/bin/python <pkg>`.
 
 ## GCP — exploration en lecture seule
 
