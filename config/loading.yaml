@@ -134,3 +134,6 @@ garmin:
   hill_score:
     dataset: dp_lake_garmin_{env}
     table: normalized_hill_score
+  lifestyle_logging:
+    dataset: dp_lake_garmin_{env}
+    table: normalized_lifestyle_logging
