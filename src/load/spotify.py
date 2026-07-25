@@ -40,27 +40,45 @@ def load(
     dataset: str = DATASET,
     table: str = None,
 ) -> None:
-    """Load a Spotify JSONL file from GCS into BigQuery (append, autodetect)."""
-    table_id = f"{project}.{dataset}.{table or data_type.value}"
-
-    job_config = bigquery.LoadJobConfig(
-        source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
-        write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
-        autodetect=True,
-        schema_update_options=[
-            bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION,
-        ],
-        time_partitioning=bigquery.TimePartitioning(
-            type_=bigquery.TimePartitioningType.MONTH,
-            field="_ingested_at",
-        ),
-    )
+    """Load a Spotify JSONL file from GCS into BigQuery."""
+    table_name = table or data_type.value
+    table_id = f"{project}.{dataset}.{table_name}"
 
     try:
         client = bigquery.Client(project=project)
         _ensure_dataset(client, project, dataset)
+
+        # Reuse the existing schema so autodetect cannot reinterpret values
+        # between files (for example, a STRING release_date as a DATE).
+        table_ref = bigquery.TableReference(
+            bigquery.DatasetReference(project, dataset), table_name
+        )
+        try:
+            existing_schema = client.get_table(table_ref).schema
+            autodetect = False
+        except NotFound:
+            existing_schema = None
+            autodetect = True
+
+        job_config = bigquery.LoadJobConfig(
+            source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
+            write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
+            autodetect=autodetect,
+            schema=existing_schema,
+            ignore_unknown_values=True,
+            schema_update_options=[
+                bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION,
+            ],
+            time_partitioning=bigquery.TimePartitioning(
+                type_=bigquery.TimePartitioningType.MONTH,
+                field="_ingested_at",
+            ),
+        )
+
         load_job = client.load_table_from_uri(gcs_uri, table_id, job_config=job_config)
         load_job.result()
         logger.info(f"Loaded {gcs_uri} → {table_id}")
+    except SpotifyLoaderError:
+        raise
     except Exception as e:
         raise SpotifyLoaderError(f"Failed to load {gcs_uri} into {table_id}: {e}") from e
