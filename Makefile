@@ -8,7 +8,7 @@ GCS_DIR ?=
 ENV_FILE := $(wildcard .env)
 ENV_FILE_FLAG := $(if $(ENV_FILE),--env-file .env,)
 
-.PHONY: build fetch load run
+.PHONY: build fetch load run lyrics
 
 build:
 	docker build -t $(IMAGE) .
@@ -68,3 +68,12 @@ run: build
 	    --env $(ENV) \
 	    --source $(SOURCE) \
 	    --data-types $(TYPES))
+
+## make lyrics ENV=dev [LIMIT=100] — fetch lyrics from LRCLIB
+lyrics: build
+	docker run --rm \
+	  -v "$(HOME)/.config/gcloud:/root/.config/gcloud:ro" \
+	  -e GOOGLE_APPLICATION_CREDENTIALS=/root/.config/gcloud/application_default_credentials.json \
+	  --entrypoint python \
+	  $(IMAGE) \
+	  scripts/fetch_lyrics.py --env $(ENV) --limit $(or $(LIMIT),100)
